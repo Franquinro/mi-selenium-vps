@@ -131,7 +131,6 @@ def index():
         df = pd.read_sql_query("SELECT * FROM lecturas", conn)
         conn.close()
         
-        # Separar por planta (BARRANCO son los primeros 8, JINAMAR los últimos 3)
         data_barranco = df.iloc[:8].values.tolist()
         data_jinamar = df.iloc[8:].values.tolist()
     except:
@@ -157,54 +156,55 @@ def index():
                 font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
                 background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
                 color: #e0e0e0;
-                padding: 20px;
+                padding: 12px;
                 min-height: 100vh;
+                overflow-y: auto;
             }
             
             .dashboard-header {
                 text-align: center;
-                margin-bottom: 30px;
-                padding: 20px;
+                margin-bottom: 15px;
+                padding: 12px;
                 background: rgba(255, 255, 255, 0.05);
-                border-radius: 12px;
+                border-radius: 10px;
                 backdrop-filter: blur(10px);
-                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+                box-shadow: 0 3px 15px rgba(0, 0, 0, 0.3);
             }
             
             .dashboard-header h1 {
-                font-size: 2.2em;
+                font-size: 1.6em;
                 font-weight: 700;
                 color: #ffffff;
-                margin-bottom: 8px;
-                text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+                margin-bottom: 4px;
+                text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
             }
             
             .dashboard-header .subtitle {
-                font-size: 0.95em;
+                font-size: 0.8em;
                 color: #a0aec0;
-                letter-spacing: 0.5px;
+                letter-spacing: 0.4px;
             }
             
             .plant-container {
                 background: rgba(255, 255, 255, 0.08);
-                border-radius: 16px;
-                padding: 25px;
-                margin-bottom: 30px;
-                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+                border-radius: 12px;
+                padding: 15px;
+                margin-bottom: 15px;
+                box-shadow: 0 6px 25px rgba(0, 0, 0, 0.3);
                 backdrop-filter: blur(10px);
                 border: 1px solid rgba(255, 255, 255, 0.1);
             }
             
             .plant-title {
-                font-size: 1.5em;
+                font-size: 1.2em;
                 font-weight: 700;
                 color: #ffffff;
-                margin-bottom: 20px;
-                padding-bottom: 12px;
+                margin-bottom: 12px;
+                padding-bottom: 8px;
                 border-bottom: 3px solid;
                 display: flex;
                 align-items: center;
-                gap: 12px;
+                gap: 10px;
             }
             
             .plant-container.barranco .plant-title {
@@ -216,13 +216,13 @@ def index():
             }
             
             .plant-icon {
-                width: 36px;
-                height: 36px;
-                border-radius: 8px;
+                width: 28px;
+                height: 28px;
+                border-radius: 6px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                font-size: 1.3em;
+                font-size: 1.1em;
                 font-weight: bold;
             }
             
@@ -238,22 +238,22 @@ def index():
             
             .widgets-grid {
                 display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-                gap: 18px;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 12px;
             }
             
             .widget {
                 background: rgba(255, 255, 255, 0.06);
-                border-radius: 12px;
-                padding: 20px;
+                border-radius: 10px;
+                padding: 14px;
                 border: 1px solid rgba(255, 255, 255, 0.08);
                 transition: all 0.3s ease;
-                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+                box-shadow: 0 3px 12px rgba(0, 0, 0, 0.2);
             }
             
             .widget:hover {
-                transform: translateY(-4px);
-                box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
+                transform: translateY(-3px);
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
                 border-color: rgba(255, 255, 255, 0.15);
             }
             
@@ -261,72 +261,72 @@ def index():
                 display: flex;
                 justify-content: space-between;
                 align-items: flex-start;
-                margin-bottom: 12px;
+                margin-bottom: 10px;
             }
             
             .tank-name {
                 font-weight: 700;
-                font-size: 1.05em;
+                font-size: 0.85em;
                 color: #ffffff;
-                line-height: 1.3;
+                line-height: 1.2;
                 flex: 1;
             }
             
             .timestamp {
-                font-size: 0.75em;
+                font-size: 0.65em;
                 color: #718096;
                 white-space: nowrap;
-                margin-left: 12px;
-                padding: 4px 10px;
+                margin-left: 8px;
+                padding: 3px 7px;
                 background: rgba(0, 0, 0, 0.2);
-                border-radius: 6px;
+                border-radius: 5px;
             }
             
             .value-display {
                 display: flex;
                 align-items: baseline;
-                gap: 8px;
-                margin-bottom: 8px;
+                gap: 6px;
+                margin-bottom: 6px;
             }
             
             .value-number {
-                font-size: 2.8em;
+                font-size: 2em;
                 font-weight: 700;
                 color: #ffffff;
                 line-height: 1;
             }
             
             .value-unit {
-                font-size: 1.1em;
+                font-size: 0.9em;
                 color: #a0aec0;
                 font-weight: 600;
             }
             
             .max-indicator {
-                font-size: 0.85em;
+                font-size: 0.7em;
                 color: #4299e1;
                 font-weight: 600;
-                margin-bottom: 10px;
+                margin-bottom: 8px;
             }
             
             .level-indicator {
                 position: relative;
-                height: 28px;
+                height: 22px;
                 background: rgba(0, 0, 0, 0.3);
-                border-radius: 14px;
+                border-radius: 11px;
                 overflow: hidden;
-                box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.3);
+                box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
             }
             
             .level-fill {
                 height: 100%;
-                border-radius: 14px;
+                border-radius: 11px;
                 transition: width 0.8s ease, background 0.3s ease;
                 display: flex;
                 align-items: center;
                 justify-content: flex-end;
-                padding-right: 12px;
-                font-size: 0.75em;
+                padding-right: 10px;
+                font-size: 0.68em;
                 font-weight: 700;
                 color: white;
                 text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
@@ -350,25 +350,37 @@ def index():
             
             .debug-button {
                 position: fixed;
-                bottom: 30px;
-                right: 30px;
+                bottom: 20px;
+                right: 20px;
                 background: rgba(255, 255, 255, 0.1);
                 color: white;
                 border: 1px solid rgba(255, 255, 255, 0.2);
-                padding: 14px 24px;
-                border-radius: 12px;
+                padding: 10px 18px;
+                border-radius: 10px;
                 text-decoration: none;
                 font-weight: 600;
-                font-size: 0.95em;
+                font-size: 0.8em;
                 transition: all 0.3s ease;
                 backdrop-filter: blur(10px);
-                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+                box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
             }
             
             .debug-button:hover {
                 background: rgba(255, 255, 255, 0.15);
                 transform: translateY(-2px);
-                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+                box-shadow: 0 5px 16px rgba(0, 0, 0, 0.4);
+            }
+            
+            @media (max-width: 1600px) {
+                .widgets-grid {
+                    grid-template-columns: repeat(3, 1fr);
+                }
+            }
+            
+            @media (max-width: 1200px) {
+                .widgets-grid {
+                    grid-template-columns: repeat(2, 1fr);
+                }
             }
             
             @media (max-width: 768px) {
@@ -377,11 +389,11 @@ def index():
                 }
                 
                 .dashboard-header h1 {
-                    font-size: 1.6em;
+                    font-size: 1.3em;
                 }
                 
                 .value-number {
-                    font-size: 2.2em;
+                    font-size: 1.8em;
                 }
             }
         </style>
