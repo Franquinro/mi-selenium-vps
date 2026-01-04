@@ -51,29 +51,39 @@ def ejecutar_scrapping():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    # Forzamos User-Agent de escritorio para evitar la vista de tablets que se ve en tu captura
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+    # User-Agent de escritorio real para evitar que PI Vision se ponga en modo "Tablet"
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     driver = webdriver.Chrome(options=options)
+    
     try:
-        # PASO 1: Autenticar en la raíz (esto guarda las cookies/sesión)
-        # Usamos la URL sin el fragmento #
-        auth_base = f"https://{USERNAME}:{PASSWORD1}@eworkerbrrc.endesa.es/PIVision/"
-        print("Autenticando en la base...")
-        driver.get(auth_base)
-        time.sleep(5) 
+        # 1. AUTENTICACIÓN (Ir a la raíz para establecer la sesión)
+        # Limpiamos las credenciales por si acaso tienen caracteres especiales
+        url_login = f"https://{USERNAME}:{PASSWORD1}@eworkerbrrc.endesa.es/PIVision/"
+        print("Paso 1: Autenticando en la raíz...")
+        driver.get(url_login)
+        time.sleep(10) # Esperamos a que cargue la pantalla azul de "Recent" que vimos antes
 
-        # PASO 2: Navegar al display real ahora que ya estamos logueados
-        print(f"Navegando al display: {URL_BASE}")
+        # 2. NAVEGACIÓN FORZADA POR JAVASCRIPT
+        # En apps Angular, a veces es mejor cambiar el hash manualmente
+        print(f"Paso 2: Forzando navegación al Display...")
+        # Intentamos navegación normal primero
         driver.get(URL_BASE)
+        time.sleep(5)
         
-        # Espera larga para que PI Vision cargue los datos (Angular es lento)
-        print("Esperando renderizado de datos (25s)...")
-        time.sleep(25) 
+        # Si sigue en la Home, inyectamos JS para mover el router de Angular
+        display_hash = "#/Displays/88153/Balance-Combustible-Bco"
+        driver.execute_script(f"window.location.hash = '{display_hash}';")
         
-        # Guardar captura para confirmar que ya no vemos "Recent" sino el display
+        # 3. ESPERA DE CARGA DE DATOS
+        print("Paso 3: Esperando renderizado de datos (30s)...")
+        # PI Vision es pesado, 30 segundos es prudente para un VPS
+        time.sleep(30) 
+        
+        # Tomamos captura para ver si ya estamos dentro del display
         driver.save_screenshot(SCREENSHOT_PATH)
 
+        # 4. CAPTURA DE VALORES
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         fecha_actual = datetime.now().strftime("%H:%M:%S")
@@ -81,35 +91,40 @@ def ejecutar_scrapping():
         encontrados = 0
         for tag, descripcion in DATOS_A_BUSCAR:
             try:
-                # XPath mejorado para PI Vision
+                # XPath mejorado: buscamos el div que tiene el tag en el title
+                # Pero extraemos el texto de su descendiente directo o el valor total
                 xpath = f"//div[contains(@title, '{tag}')]"
-                # Esperamos a que el elemento contenga algún texto (que no sea vacío)
+                
+                # Usamos WebDriverWait para cada elemento por si acaso alguno tarda más
                 elemento = WebDriverWait(driver, 10).until(
                     EC.visibility_of_element_located((By.XPATH, xpath))
                 )
                 
-                # Intentamos sacar el texto de varias formas
-                valor = elemento.text.strip()
-                if not valor:
-                    valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
+                # Truco para PI Vision: A veces el texto no es visible para .text 
+                # pero sí para innerText vía JS
+                valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
                 
+                # PI Vision a veces pone el valor en una línea nueva, lo limpiamos
+                if "\n" in valor:
+                    valor = valor.split("\n")[-1] # Intentamos pillar el último trozo (el número)
+
                 if not valor or valor == "": 
                     valor = "Cargando..."
 
                 cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
                                (descripcion, valor, fecha_actual))
                 encontrados += 1
-                print(f"Capturado: {descripcion} = {valor}")
+                print(f"[{encontrados}] {descripcion}: {valor}")
             except:
                 cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
                                (descripcion, "No detectado", fecha_actual))
         
         conn.commit()
         conn.close()
-        print(f"Captura terminada. Elementos OK: {encontrados}/{len(DATOS_A_BUSCAR)}")
+        print(f"Proceso completado. Capturados {encontrados} de {len(DATOS_A_BUSCAR)}")
 
     except Exception as e:
-        print(f"Error en Selenium: {e}")
+        print(f"Error crítico: {e}")
         driver.save_screenshot(SCREENSHOT_PATH)
     finally:
         driver.quit()
@@ -186,4 +201,5 @@ if __name__ == "__main__":
     ejecutar_scrapping()
     
     app.run(host='0.0.0.0', port=5000)
+
 
