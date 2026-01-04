@@ -159,6 +159,9 @@ def index():
                 padding: 12px;
                 min-height: 100vh;
                 overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
             }
             
             .dashboard-header {
@@ -169,6 +172,7 @@ def index():
                 border-radius: 10px;
                 backdrop-filter: blur(10px);
                 box-shadow: 0 3px 15px rgba(0, 0, 0, 0.3);
+                width: 80%;
             }
             
             .dashboard-header h1 {
@@ -193,6 +197,7 @@ def index():
                 box-shadow: 0 6px 25px rgba(0, 0, 0, 0.3);
                 backdrop-filter: blur(10px);
                 border: 1px solid rgba(255, 255, 255, 0.1);
+                width: 80%;
             }
             
             .plant-title {
@@ -348,29 +353,6 @@ def index():
                 background: linear-gradient(90deg, #718096, #4a5568);
             }
             
-            .debug-button {
-                position: fixed;
-                bottom: 20px;
-                right: 20px;
-                background: rgba(255, 255, 255, 0.1);
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                padding: 10px 18px;
-                border-radius: 10px;
-                text-decoration: none;
-                font-weight: 600;
-                font-size: 0.8em;
-                transition: all 0.3s ease;
-                backdrop-filter: blur(10px);
-                box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
-            }
-            
-            .debug-button:hover {
-                background: rgba(255, 255, 255, 0.15);
-                transform: translateY(-2px);
-                box-shadow: 0 5px 16px rgba(0, 0, 0, 0.4);
-            }
-            
             @media (max-width: 1600px) {
                 .widgets-grid {
                     grid-template-columns: repeat(3, 1fr);
@@ -381,11 +363,21 @@ def index():
                 .widgets-grid {
                     grid-template-columns: repeat(2, 1fr);
                 }
+                
+                .dashboard-header,
+                .plant-container {
+                    width: 90%;
+                }
             }
             
             @media (max-width: 768px) {
                 .widgets-grid {
                     grid-template-columns: 1fr;
+                }
+                
+                .dashboard-header,
+                .plant-container {
+                    width: 95%;
                 }
                 
                 .dashboard-header h1 {
@@ -473,8 +465,6 @@ def index():
                 {% endfor %}
             </div>
         </div>
-        
-        <a href="/debug" class="debug-button">🔍 Ver Estado del Navegador</a>
     </body>
     </html>
     """
