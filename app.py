@@ -1,27 +1,27 @@
 import os
-import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
 import time
-from datetime import datetime
 import sqlite3
+import pandas as pd
+from datetime import datetime
 from flask import Flask, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
 
-USERNAME = os.getenv('SCRAP_USER', 'enelint%5CesUsuario')
-PASSWORD1 = os.getenv('SCRAP_PASS1', 'Pass1')
-PASSWORD2 = os.getenv('SCRAP_PASS2', 'Pass2')
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN ---
-DB_NAME = "datos_captura.db"
-USERNAME = "enelint%5CesUsuario"
-PASSWORD1 = "Pass1"
-PASSWORD2 = "Pass2"
+# Se leen de las variables de entorno configuradas en Coolify
+USERNAME = os.getenv('SCRAP_USER', 'usuario_por_defecto')
+PASSWORD1 = os.getenv('SCRAP_PASS1', 'pass1_por_defecto')
+PASSWORD2 = os.getenv('SCRAP_PASS2', 'pass2_por_defecto')
+
 URL_BASE = "https://eworkerbrrc.endesa.es/PIVision/#/Displays/88153/Balance-Combustible-Bco"
+DB_NAME = "datos_temporales.db"
 
 DATOS_A_BUSCAR = (
     ('\\PI-BRRC-S1\\BRRC00-0LBL111A', 'BARRANCO - TANQUE ALMACEN FO'),
@@ -37,8 +37,8 @@ DATOS_A_BUSCAR = (
     ('\\PI-JINA-S1\\JINA00-145J045826', 'JINAMAR - NIVEL GO DIESEL 4/5')
 )
 
-# --- FUNCIONES DE BASE DE DATOS ---
 def init_db():
+    """Inicializa la base de datos en cada arranque del contenedor."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS lecturas 
@@ -47,26 +47,37 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- LÓGICA DE SCRAPPING ---
 def ejecutar_scrapping():
-    print(f"[{datetime.now()}] Iniciando captura de datos...")
+    print(f"[{datetime.now()}] Iniciando captura de datos Selenium...")
     
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    
-    # En Docker/Ubuntu 24.04 el path suele ser este:
+    options.add_argument("--window-size=1920,1080") # Aumentamos resolución para asegurar visibilidad
+
     driver = webdriver.Chrome(options=options)
     
     try:
-        # Intento de login (simplificado para el ejemplo)
-        # Nota: La autenticación básica en URL puede no ser soportada en navegadores recientes.
-        # Si falla, considerar usar extensiones o autenticación manual mediante send_keys.
-        url_auth = f"https://{USERNAME}:{PASSWORD1}@{URL_BASE.replace('https://', '')}"
-        driver.get(url_auth)
-        time.sleep(10) # Esperar carga
+        # Intentamos con la primera contraseña
+        auth_url = f"https://{USERNAME}:{PASSWORD1}@{URL_BASE.replace('https://', '')}"
+        driver.get(auth_url)
+        
+        # Espera explícita: hasta 40 segundos a que cargue la estructura de símbolos de PI Vision
+        wait = WebDriverWait(driver, 40)
+        
+        try:
+            # Esperamos a que aparezca al menos un contenedor de símbolos
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "symbol-host")))
+        except:
+            print("Fallo primer login, intentando con contraseña 2...")
+            auth_url2 = f"https://{USERNAME}:{PASSWORD2}@{URL_BASE.replace('https://', '')}"
+            driver.get(auth_url2)
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "symbol-host")))
+
+        # Pequeño margen para que los valores numéricos se pueblen tras cargar la estructura
+        time.sleep(10)
 
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -74,77 +85,112 @@ def ejecutar_scrapping():
 
         for tag, descripcion in DATOS_A_BUSCAR:
             try:
-                elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
-                valor = elemento.text
+                # Localizamos el div que contiene el TAG en su atributo title
+                # Usamos contains para ser flexibles con los saltos de línea del title
+                xpath = f"//div[contains(@title, '{tag}')]"
+                elemento = driver.find_element(By.XPATH, xpath)
+                
+                # Extraemos el texto (Selenium captura el texto del span interno automáticamente)
+                valor = elemento.text.strip()
+                
+                # Si .text falla, intentamos con innerText vía JS
+                if not valor:
+                    valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
+
+                print(f"OK: {descripcion} -> {valor}")
                 cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
                                (descripcion, valor, fecha_actual))
-            except:
+            except Exception as e:
+                print(f"Error capturando {descripcion}: {str(e)[:50]}")
                 cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
-                               (descripcion, "Error/No encontrado", fecha_actual))
+                               (descripcion, "No detectado", fecha_actual))
         
         conn.commit()
         conn.close()
-        print("Captura finalizada con éxito.")
+        print("Proceso de guardado finalizado.")
+
     except Exception as e:
-        print(f"Error en el proceso: {e}")
+        print(f"Error crítico en Selenium: {e}")
     finally:
         driver.quit()
 
-# --- RUTAS WEB (FLASK) ---
+# --- RUTAS FLASK ---
 @app.route('/')
 def index():
-    conn = sqlite3.connect(DB_NAME)
-    # Recuperamos las últimas 50 lecturas
-    df = pd.read_sql_query("SELECT * FROM lecturas ORDER BY id DESC LIMIT 50", conn)
-    conn.close()
-    
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        # Obtenemos los últimos 11 registros (una captura completa)
+        df = pd.read_sql_query("SELECT descripcion, valor, fecha FROM lecturas ORDER BY id DESC LIMIT 11", conn)
+        conn.close()
+        data = df.values.tolist()
+    except:
+        data = []
+
     html = """
+    <!(DOCTYPE html)>
     <html>
         <head>
-            <title>Panel Control Combustible</title>
+            <title>Niveles Combustible - Tiempo Real</title>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
             <meta http-equiv="refresh" content="60">
+            <style>
+                body { background-color: #f8f9fa; }
+                .card { border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                .table thead { background-color: #212529; color: white; }
+                .status-tag { font-size: 0.8em; color: #6c757d; }
+            </style>
         </head>
-        <body class="container mt-5">
-            <h2 class="mb-4">Últimas capturas de datos</h2>
-            <table class="table table-striped table-hover">
-                <thead class="table-dark">
-                    <tr><th>Fecha</th><th>Descripción</th><th>Valor</th></tr>
-                </thead>
-                <tbody>
-                    {% for row in data %}
-                    <tr><td>{{ row[3] }}</td><td>{{ row[1] }}</td><td>{{ row[2] }}</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        <body class="container py-5">
+            <div class="row justify-content-center">
+                <div class="col-md-10">
+                    <div class="card p-4 bg-white">
+                        <div class="d-flex justify-content-between align-items-center mb-4">
+                            <h2 class="m-0">Última Captura de Niveles</h2>
+                            <span class="badge bg-primary">Auto-refresh: 60s</span>
+                        </div>
+                        
+                        <table class="table table-hover border">
+                            <thead>
+                                <tr>
+                                    <th>Descripción</th>
+                                    <th>Valor Detectado</th>
+                                    <th>Fecha/Hora Captura</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row in data %}
+                                <tr>
+                                    <td class="fw-bold text-secondary">{{ row[0] }}</td>
+                                    <td><span class="badge bg-success fs-6">{{ row[1] }}</span></td>
+                                    <td class="status-tag">{{ row[2] }}</td>
+                                </tr>
+                                {% endfor %}
+                                {% if not data %}
+                                <tr><td colspan="3" class="text-center p-4">Esperando la primera captura del sistema...</td></tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                        <p class="text-muted small mt-3">El script se ejecuta automáticamente cada 1 hora.</p>
+                    </div>
+                </div>
+            </div>
         </body>
     </html>
     """
-    return render_template_string(html, data=df.values.tolist())
+    return render_template_string(html, data=data)
 
-# --- PROGRAMADOR ---
 if __name__ == "__main__":
     init_db()
     
-    # Configurar tarea programada cada hora
+    # Configurar tarea programada
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=ejecutar_scrapping, trigger="interval", hours=1)
     scheduler.start()
 
-    # Ejecutar una vez al arrancar para tener datos iniciales
-    # Se ejecuta en un hilo separado o antes de bloquear con app.run pero cuidado con el bloqueo
-    # Para simplificar en Flask dev server, lo lanzamos aqui, pero ten en cuenta que app.run bloquea.
-    # En producción con gunicorn sería diferente, pero aquí está bien.
-    # Nota: Si el scraping tarda mucho, puede retrasar el inicio del server web.
-    try:
-        # Ejecutamos scraping en segundo plano o esperamos?
-        # El usuario pidió "Ejecutar una vez al arrancar".
-        # Lo haremos, sabiendo que puede tardar.
-        print("Ejecutando primera captura al inicio...")
-        ejecutar_scrapping()
-    except Exception as e:
-        print(f"Error en primera captura: {e}")
+    # Ejecutar una captura inmediata al arrancar para no tener la web vacía
+    # Lo envolvemos en un hilo o lo ejecutamos antes de app.run
+    print("Ejecutando captura inicial...")
+    ejecutar_scrapping()
 
-    # Iniciar servidor web en puerto 5000
+    # IMPORTANTE: host='0.0.0.0' para Coolify/Docker
     app.run(host='0.0.0.0', port=5000)
-
