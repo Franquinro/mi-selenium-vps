@@ -3,7 +3,7 @@ import time
 import sqlite3
 import pandas as pd
 from datetime import datetime
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from selenium import webdriver
@@ -15,13 +15,13 @@ from selenium.webdriver.support import expected_conditions as EC
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN ---
-# Se leen de las variables de entorno configuradas en Coolify
-USERNAME = os.getenv('SCRAP_USER', 'usuario_por_defecto')
-PASSWORD1 = os.getenv('SCRAP_PASS1', 'pass1_por_defecto')
-PASSWORD2 = os.getenv('SCRAP_PASS2', 'pass2_por_defecto')
+USERNAME = os.getenv('SCRAP_USER', 'enelint%5CesUsuario')
+PASSWORD1 = os.getenv('SCRAP_PASS1', 'Pass1')
+PASSWORD2 = os.getenv('SCRAP_PASS2', 'Pass2')
 
 URL_BASE = "https://eworkerbrrc.endesa.es/PIVision/#/Displays/88153/Balance-Combustible-Bco"
 DB_NAME = "datos_temporales.db"
+SCREENSHOT_PATH = "debug_screenshot.png"
 
 DATOS_A_BUSCAR = (
     ('\\PI-BRRC-S1\\BRRC00-0LBL111A', 'BARRANCO - TANQUE ALMACEN FO'),
@@ -38,139 +38,114 @@ DATOS_A_BUSCAR = (
 )
 
 def init_db():
-    """Inicializa la base de datos en cada arranque del contenedor."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS lecturas 
-                      (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                       descripcion TEXT, valor TEXT, fecha TEXT)''')
+    cursor.execute('CREATE TABLE IF NOT EXISTS lecturas (id INTEGER PRIMARY KEY AUTOINCREMENT, descripcion TEXT, valor TEXT, fecha TEXT)')
     conn.commit()
     conn.close()
 
 def ejecutar_scrapping():
-    print(f"[{datetime.now()}] Iniciando captura de datos Selenium...")
-    
+    print(f"[{datetime.now()}] Iniciando captura...")
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080") # Aumentamos resolución para asegurar visibilidad
-
-    driver = webdriver.Chrome(options=options)
+    options.add_argument("--window-size=1920,1080")
     
+    driver = webdriver.Chrome(options=options)
     try:
-        # Intentamos con la primera contraseña
-        auth_url = f"https://{USERNAME}:{PASSWORD1}@{URL_BASE.replace('https://', '')}"
+        # Limpiamos la URL (quitamos el https:// para rearmarla)
+        clean_url = URL_BASE.replace("https://", "")
+        auth_url = f"https://{USERNAME}:{PASSWORD1}@{clean_url}"
+        
         driver.get(auth_url)
         
-        # Espera explícita: hasta 40 segundos a que cargue la estructura de símbolos de PI Vision
-        wait = WebDriverWait(driver, 40)
+        # Espera de cortesía para el renderizado inicial
+        time.sleep(15) 
         
-        try:
-            # Esperamos a que aparezca al menos un contenedor de símbolos
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "symbol-host")))
-        except:
-            print("Fallo primer login, intentando con contraseña 2...")
-            auth_url2 = f"https://{USERNAME}:{PASSWORD2}@{URL_BASE.replace('https://', '')}"
-            driver.get(auth_url2)
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "symbol-host")))
-
-        # Pequeño margen para que los valores numéricos se pueblen tras cargar la estructura
-        time.sleep(10)
+        # Guardar captura para depuración (podrás verla en /debug)
+        driver.save_screenshot(SCREENSHOT_PATH)
 
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fecha_actual = datetime.now().strftime("%H:%M:%S")
 
+        encontrados = 0
         for tag, descripcion in DATOS_A_BUSCAR:
             try:
-                # Localizamos el div que contiene el TAG en su atributo title
-                # Usamos contains para ser flexibles con los saltos de línea del title
+                # PI Vision usa el tag dentro del atributo 'title'
                 xpath = f"//div[contains(@title, '{tag}')]"
-                elemento = driver.find_element(By.XPATH, xpath)
+                # Esperamos poco por cada elemento ya que la página debería estar cargada
+                elemento = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, xpath)))
                 
-                # Extraemos el texto (Selenium captura el texto del span interno automáticamente)
                 valor = elemento.text.strip()
-                
-                # Si .text falla, intentamos con innerText vía JS
                 if not valor:
                     valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
-
-                print(f"OK: {descripcion} -> {valor}")
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
-                               (descripcion, valor, fecha_actual))
-            except Exception as e:
-                print(f"Error capturando {descripcion}: {str(e)[:50]}")
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
-                               (descripcion, "No detectado", fecha_actual))
+                
+                if not valor: valor = "Sin valor"
+                
+                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", (descripcion, valor, fecha_actual))
+                encontrados += 1
+            except:
+                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", (descripcion, "Error", fecha_actual))
         
         conn.commit()
         conn.close()
-        print("Proceso de guardado finalizado.")
+        print(f"Captura terminada. Elementos OK: {encontrados}/{len(DATOS_A_BUSCAR)}")
 
     except Exception as e:
-        print(f"Error crítico en Selenium: {e}")
+        print(f"Error en Selenium: {e}")
+        if driver: driver.save_screenshot(SCREENSHOT_PATH)
     finally:
         driver.quit()
 
-# --- RUTAS FLASK ---
+# --- RUTAS WEB ---
 @app.route('/')
 def index():
     try:
         conn = sqlite3.connect(DB_NAME)
-        # Obtenemos los últimos 11 registros (una captura completa)
         df = pd.read_sql_query("SELECT descripcion, valor, fecha FROM lecturas ORDER BY id DESC LIMIT 11", conn)
         conn.close()
         data = df.values.tolist()
     except:
         data = []
+    
+    # Invertir para que salgan en orden normal si se prefiere
+    data.reverse()
 
     html = """
-    <!(DOCTYPE html)>
     <html>
         <head>
-            <title>Niveles Combustible - Tiempo Real</title>
+            <title>Panel Niveles</title>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-            <meta http-equiv="refresh" content="60">
-            <style>
-                body { background-color: #f8f9fa; }
-                .card { border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                .table thead { background-color: #212529; color: white; }
-                .status-tag { font-size: 0.8em; color: #6c757d; }
-            </style>
+            <meta http-equiv="refresh" content="30">
         </head>
-        <body class="container py-5">
-            <div class="row justify-content-center">
-                <div class="col-md-10">
-                    <div class="card p-4 bg-white">
-                        <div class="d-flex justify-content-between align-items-center mb-4">
-                            <h2 class="m-0">Última Captura de Niveles</h2>
-                            <span class="badge bg-primary">Auto-refresh: 60s</span>
-                        </div>
-                        
-                        <table class="table table-hover border">
-                            <thead>
-                                <tr>
-                                    <th>Descripción</th>
-                                    <th>Valor Detectado</th>
-                                    <th>Fecha/Hora Captura</th>
-                                </tr>
-                            </thead>
+        <body class="bg-light">
+            <div class="container py-4">
+                <div class="card shadow">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between">
+                        <h4 class="mb-0">Niveles de Combustible</h4>
+                        <small>Refresco cada 30s</small>
+                    </div>
+                    <div class="card-body">
+                        <table class="table table-striped">
+                            <thead><tr><th>Tanque</th><th>Valor</th><th>Hora</th></tr></thead>
                             <tbody>
                                 {% for row in data %}
                                 <tr>
-                                    <td class="fw-bold text-secondary">{{ row[0] }}</td>
+                                    <td>{{ row[0] }}</td>
                                     <td><span class="badge bg-success fs-6">{{ row[1] }}</span></td>
-                                    <td class="status-tag">{{ row[2] }}</td>
+                                    <td>{{ row[2] }}</td>
                                 </tr>
                                 {% endfor %}
-                                {% if not data %}
-                                <tr><td colspan="3" class="text-center p-4">Esperando la primera captura del sistema...</td></tr>
-                                {% endif %}
                             </tbody>
                         </table>
-                        <p class="text-muted small mt-3">El script se ejecuta automáticamente cada 1 hora.</p>
+                        {% if not data %}
+                        <div class="alert alert-warning text-center">Iniciando sistema... espera 30 segundos.</div>
+                        {% endif %}
+                    </div>
+                    <div class="card-footer text-center">
+                        <a href="/debug" class="btn btn-sm btn-outline-secondary">Ver Diagnóstico (Screenshot)</a>
                     </div>
                 </div>
             </div>
@@ -179,18 +154,20 @@ def index():
     """
     return render_template_string(html, data=data)
 
+@app.route('/debug')
+def debug():
+    """Ruta para ver qué está viendo el navegador en el VPS."""
+    if os.path.exists(SCREENSHOT_PATH):
+        return send_file(SCREENSHOT_PATH, mimetype='image/png')
+    return "No hay captura disponible todavía.", 404
+
 if __name__ == "__main__":
     init_db()
-    
-    # Configurar tarea programada
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=ejecutar_scrapping, trigger="interval", hours=1)
     scheduler.start()
-
-    # Ejecutar una captura inmediata al arrancar para no tener la web vacía
-    # Lo envolvemos en un hilo o lo ejecutamos antes de app.run
-    print("Ejecutando captura inicial...")
+    
+    # Ejecución inicial
     ejecutar_scrapping()
-
-    # IMPORTANTE: host='0.0.0.0' para Coolify/Docker
+    
     app.run(host='0.0.0.0', port=5000)
