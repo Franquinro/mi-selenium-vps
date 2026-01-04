@@ -10,6 +10,10 @@ import sqlite3
 from flask import Flask, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
 
+USERNAME = os.getenv('SCRAP_USER', 'enelint%5CesUsuario')
+PASSWORD1 = os.getenv('SCRAP_PASS1', 'Pass1')
+PASSWORD2 = os.getenv('SCRAP_PASS2', 'Pass2')
+
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN ---
@@ -143,3 +147,4 @@ if __name__ == "__main__":
 
     # Iniciar servidor web en puerto 5000
     app.run(host='0.0.0.0', port=5000)
+
