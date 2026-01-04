@@ -18,7 +18,7 @@ app = Flask(__name__)
 # =============================================================================
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # =============================================================================
-USERNAME = os.getenv("SCRAP_USER", r"enelint\usuario")
+USERNAME = r"enelint\es43282213p"
 PASSWORD1 = os.getenv("SCRAP_PASS1", "pass1")
 PASSWORD2 = os.getenv("SCRAP_PASS2", "")
 
@@ -234,3 +234,4 @@ if __name__ == "__main__":
     ejecutar_scrapping()
 
     app.run(host='0.0.0.0', port=5000)
+
