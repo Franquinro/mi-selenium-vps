@@ -1,42 +1,244 @@
 import os
-import time
-import base64
-import sqlite3
 import pandas as pd
-from datetime import datetime
-from flask import Flask, render_template_string, send_file
-from apscheduler.schedulers.background import BackgroundScheduler
-
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
+import time
+from datetime import datetime
+import subprocess
+import sys
+from tqdm import tqdm
+from colorama import Fore, Style, init
+import base64
+
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-app = Flask(__name__)
+# Inicializar Colorama
+init(autoreset=True)
+
+print(Fore.CYAN + Style.BRIGHT + "\n====================================")
+print(Fore.CYAN + Style.BRIGHT + "  Script de Captura de Datos (PI Vision)")
+print(Fore.CYAN + Style.BRIGHT + "====================================\n")
 
 # =============================================================================
-# CONFIGURACIÓN Y VARIABLES DE ENTORNO
+# CONFIG RÁPIDA
 # =============================================================================
-USERNAME = r"enelint\es43282213p"
-PASSWORD1 = os.getenv("SCRAP_PASS1", "pass1")
-PASSWORD2 = os.getenv("SCRAP_PASS2", "")
+HEADLESS = True  # <-- pon False si quieres verlo
 
-DB_NAME = "temp_niveles.db"
-SCREENSHOT_PATH = "debug_vps.png"
 WINDOW_W, WINDOW_H = 1920, 1080
 
 PI_BASE_URL = "https://eworkerbrrc.endesa.es/PIVision/"
+
 DISPLAY_ID = "88153"
 DISPLAY_SLUG = "Balance-Combustible-Bco"
+
+# Importante: parámetros estilo Android (kiosk + NO redirect)
 KIOSK_QUERY = "mode=kiosk&hidetoolbar&redirect=false"
 
+# Hashes objetivo (con y sin slug) + kiosk params
 TARGET_HASHES = [
     f"#/Displays/{DISPLAY_ID}/{DISPLAY_SLUG}?{KIOSK_QUERY}",
     f"#/Displays/{DISPLAY_ID}?{KIOSK_QUERY}",
 ]
 
-DATOS_A_BUSCAR = (
+# =============================================================================
+# CREDENCIALES (por entorno)
+# =============================================================================
+username = r"enelint\es43282213p"
+password1 = os.getenv("PI_PASS1", "")
+password2 = os.getenv("PI_PASS2", "")
+
+if not password1 and not password2:
+    print(Fore.RED + "No hay contraseñas configuradas. Define PI_PASS1/PI_PASS2 en variables de entorno.")
+    input("\nPulse ENTER/RETURN para finalizar el programa.")
+    sys.exit(1)
+
+# =============================================================================
+# UTILIDADES
+# =============================================================================
+def abrir_excel(file_path):
+    if os.name == 'nt':
+        os.startfile(file_path)
+    elif os.name == 'posix':
+        subprocess.call(['open', file_path] if sys.platform == 'darwin' else ['xdg-open', file_path])
+
+
+def set_basic_auth_header(driver, user, password):
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    driver.execute_cdp_cmd("Network.enable", {})
+    driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
+        "headers": {"Authorization": f"Basic {token}"}
+    })
+
+
+def inject_anti_automation(driver):
+    """
+    Reduce detección básica en headless.
+    IMPORTANTE: debe ejecutarse ANTES de cargar la web.
+    """
+    script = r"""
+    // webdriver -> undefined
+    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+    // touch points -> 0
+    Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
+
+    // language
+    Object.defineProperty(navigator, 'language', {get: () => 'es-ES'});
+    Object.defineProperty(navigator, 'languages', {get: () => ['es-ES', 'es', 'en-US', 'en']});
+    """
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
+
+
+def configure_desktop_mode(driver):
+    """
+    Fuerza modo escritorio y evita UI "Reciente/Buscar" tipo móvil en headless.
+    - UA normal (sin HeadlessChrome)
+    - device metrics desktop (mobile=False)
+    - touch emulation off
+    - UA-CH metadata (si está disponible) con mobile=False
+    """
+    version = (driver.capabilities.get("browserVersion") or "").strip()
+    major = "120"
+    try:
+        major = version.split(".")[0]
+    except Exception:
+        pass
+
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{version} Safari/537.36"
+    )
+
+    driver.execute_cdp_cmd("Network.enable", {})
+
+    # Primero intentamos con userAgentMetadata (UA Client Hints) para asegurar mobile=False
+    try:
+        driver.execute_cdp_cmd("Network.setUserAgentOverride", {
+            "userAgent": ua,
+            "acceptLanguage": "es-ES,es;q=0.9,en;q=0.8",
+            "platform": "Windows",
+            "userAgentMetadata": {
+                "brands": [
+                    {"brand": "Google Chrome", "version": major},
+                    {"brand": "Chromium", "version": major},
+                    {"brand": "Not_A Brand", "version": "99"},
+                ],
+                "fullVersion": version,
+                "platform": "Windows",
+                "platformVersion": "10.0.0",
+                "architecture": "x86",
+                "model": "",
+                "mobile": False,
+            }
+        })
+    except Exception:
+        # Fallback: solo UA clásico
+        driver.execute_cdp_cmd("Network.setUserAgentOverride", {
+            "userAgent": ua,
+            "acceptLanguage": "es-ES,es;q=0.9,en;q=0.8",
+            "platform": "Windows",
+        })
+
+    # Device metrics desktop
+    driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+        "mobile": False,
+        "width": WINDOW_W,
+        "height": WINDOW_H,
+        "deviceScaleFactor": 1
+    })
+
+    # Touch OFF
+    try:
+        driver.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+    except Exception:
+        pass
+
+
+def build_driver():
+    options = webdriver.ChromeOptions()
+
+    if HEADLESS:
+        options.add_argument("--headless=new")
+        options.add_argument(f"--window-size={WINDOW_W},{WINDOW_H}")
+        # Importante: NO desactivar GPU aquí (PI Vision a veces pinta cosas en canvas)
+        # options.add_argument("--disable-gpu")
+    else:
+        options.add_argument("--start-maximized")
+        options.add_argument(f"--window-size={WINDOW_W},{WINDOW_H}")
+
+    options.add_argument("--disable-extensions")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    # Reduce banderas típicas de automatización
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    driver = webdriver.Chrome(options=options)
+
+    try:
+        driver.set_window_size(WINDOW_W, WINDOW_H)
+    except Exception:
+        pass
+
+    # IMPORTANTE: esto tiene que ir antes de cualquier driver.get(...)
+    if HEADLESS:
+        inject_anti_automation(driver)
+        configure_desktop_mode(driver)
+
+    return driver
+
+
+def is_on_display(driver):
+    url = driver.current_url or ""
+    return f"/#/Displays/{DISPLAY_ID}" in url
+
+
+def is_on_recent(driver):
+    # En tu captura parece UI de Recientes; esto ayuda a detectarlo
+    url = (driver.current_url or "").lower()
+    title = (driver.title or "").lower()
+    return ("/#/recent" in url) or ("reciente" in title) or ("recent" in title)
+
+
+def navigate_to_display(driver, timeout=90):
+    """
+    Navega al display objetivo. Si PI Vision cae en 'Reciente', reintenta.
+    """
+    for attempt in range(1, 6):
+        # Intento 1: URL completa con hash + kiosk params (como Android)
+        target_url = PI_BASE_URL + TARGET_HASHES[0]
+        driver.get(target_url)
+
+        # Espera inicial
+        time.sleep(3)
+
+        # Si ya está en display, OK
+        if is_on_display(driver):
+            return True
+
+        # Si cayó en "Reciente", forzar hash de nuevo (sin recargar dominio)
+        for h in TARGET_HASHES:
+            try:
+                driver.execute_script("window.location.hash = arguments[0];", h)
+                WebDriverWait(driver, 12).until(lambda d: is_on_display(d))
+                return True
+            except Exception:
+                continue
+
+        # Si no, espera y reintenta
+        time.sleep(2)
+
+    return False
+
+
+# =============================================================================
+# DATOS A CAPTURAR
+# =============================================================================
+datos = (
     ('\\PI-BRRC-S1\\BRRC00-0LBL111A', 'BARRANCO - TANQUE ALMACEN FO'),
     ('\\PI-BRRC-S1\\BRRC00-0LBL111B', 'BARRANCO - TANQUE ALMACEN GO A'),
     ('\\PI-BRRC-S1\\BRRC00-0LBL111C', 'BARRANCO - TANQUE ALMACEN GO B'),
@@ -51,187 +253,104 @@ DATOS_A_BUSCAR = (
 )
 
 # =============================================================================
-# LÓGICA DE NAVEGACIÓN AVANZADA (TU VERSIÓN LOCAL)
+# MAIN
 # =============================================================================
+driver = build_driver()
+authenticated = False
+resultados = []
 
-def set_basic_auth_header(driver, user, password):
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    driver.execute_cdp_cmd("Network.enable", {})
-    driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
-        "headers": {"Authorization": f"Basic {token}"}
-    })
+def try_password(pw, label):
+    if not pw:
+        return False
 
-def inject_anti_automation(driver):
-    script = r"""
-    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-    Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
-    Object.defineProperty(navigator, 'language', {get: () => 'es-ES'});
-    """
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
+    print(Fore.YELLOW + f"Intentando autenticación {label} ...")
+    set_basic_auth_header(driver, username, pw)
 
-def configure_desktop_mode(driver):
-    version = (driver.capabilities.get("browserVersion") or "120").strip()
-    ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
-    
-    driver.execute_cdp_cmd("Network.enable", {})
-    driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": ua, "platform": "Windows"})
-    driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
-        "mobile": False, "width": WINDOW_W, "height": WINDOW_H, "deviceScaleFactor": 1
-    })
+    ok = navigate_to_display(driver, timeout=90)
+    if not ok:
+        print(Fore.RED + "No se pudo abrir el display (se quedó fuera).")
+        print(Fore.RED + f"URL actual: {driver.current_url}")
+        print(Fore.RED + f"Título actual: {driver.title}")
 
-def build_driver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument(f"--window-size={WINDOW_W},{WINDOW_H}")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    
-    driver = webdriver.Chrome(options=options)
-    inject_anti_automation(driver)
-    configure_desktop_mode(driver)
-    return driver
+        # Captura de depuración (muy útil en headless)
+        try:
+            driver.save_screenshot(f"debug_{label}.png")
+            print(Fore.YELLOW + f"Captura guardada: debug_{label}.png")
+        except Exception:
+            pass
+        return False
 
-def is_on_display(driver):
-    return f"/#/Displays/{DISPLAY_ID}" in (driver.current_url or "")
+    return True
 
-def navigate_to_display(driver):
-    for _ in range(3):
-        driver.get(PI_BASE_URL + TARGET_HASHES[0])
-        time.sleep(5)
-        if is_on_display(driver): return True
-        # Forzado por JS si cae en Recent
-        for h in TARGET_HASHES:
-            try:
-                driver.execute_script("window.location.hash = arguments[0];", h)
-                WebDriverWait(driver, 10).until(lambda d: is_on_display(d))
-                return True
-            except: continue
-    return False
+try:
+    if try_password(password1, "1"):
+        authenticated = True
+    elif try_password(password2, "2"):
+        authenticated = True
 
-# =============================================================================
-# TAREA DE SCRAPPING
-# =============================================================================
+    if not authenticated:
+        print(Fore.RED + "No se pudo autenticar/abrir el display con ninguna contraseña.")
+        input("\nPulse ENTER/RETURN para finalizar el programa.")
+        sys.exit(1)
 
-def ejecutar_scrapping():
-    print(f"[{datetime.now()}] Iniciando captura...")
-    driver = build_driver()
-    
+    print(Fore.GREEN + "Display cargado. Iniciando captura de datos...")
+
+    # Esperar a que el display renderice al menos el primer tag
+    primer_tag, _ = datos[0]
     try:
-        # Autenticación
-        set_basic_auth_header(driver, USERNAME, PASSWORD1)
-        if not navigate_to_display(driver):
-            print("Fallo login 1, intentando login 2...")
-            set_basic_auth_header(driver, USERNAME, PASSWORD2)
-            if not navigate_to_display(driver):
-                raise Exception("No se pudo acceder al display")
-
-        # Esperar renderizado (máximo 120s como en tu local)
-        primer_tag = DATOS_A_BUSCAR[0][0]
         WebDriverWait(driver, 120).until(
             EC.presence_of_element_located((By.XPATH, f"//div[contains(@title, '{primer_tag}')]"))
         )
-        time.sleep(5) # Margen extra
-        
-        driver.save_screenshot(SCREENSHOT_PATH)
+    except Exception:
+        print(Fore.YELLOW + "No apareció el primer tag a tiempo. Guardando captura y continuo.")
+        try:
+            driver.save_screenshot("debug_no_tag.png")
+            print(Fore.YELLOW + "Captura guardada: debug_no_tag.png")
+        except Exception:
+            pass
 
-        # Guardar en DB
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM lecturas") # Limpiamos para no acumular (solo última captura)
-        
-        fecha_actual = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        
-        for tag, descripcion in DATOS_A_BUSCAR:
-            try:
-                elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
-                valor = (elemento.text or "").strip()
-                if not valor:
-                    valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
-                
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
-                               (descripcion, valor or "Cargando...", fecha_actual))
-            except:
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
-                               (descripcion, "No encontrado", fecha_actual))
-        
-        conn.commit()
-        conn.close()
-        print("Captura exitosa.")
+    for tag, descripcion in tqdm(datos, desc=Fore.YELLOW + "Procesando elementos", unit="elemento"):
+        try:
+            elems = driver.find_elements(By.XPATH, f"//div[contains(@title, '{tag}')]")
+            valor = ""
+            if elems:
+                # A veces el texto tarda en poblarse: reintento corto
+                for _ in range(5):
+                    valor = (elems[0].text or "").strip()
+                    if valor:
+                        break
+                    time.sleep(0.5)
+            if not valor:
+                raise Exception("Vacío / no encontrado")
 
-    except Exception as e:
-        print(f"Error: {e}")
-        driver.save_screenshot(SCREENSHOT_PATH)
-    finally:
-        driver.quit()
+            resultados.append((descripcion, valor))
+        except Exception:
+            print(Fore.RED + f"No se encontró el elemento para: {descripcion} ({tag})")
+            resultados.append((descripcion, "No encontrado"))
 
-# =============================================================================
-# APP WEB (FLASK)
-# =============================================================================
+finally:
+    driver.quit()
 
-@app.route('/')
-def index():
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM lecturas", conn)
-    conn.close()
-    
-    html = """
-    <html>
-        <head>
-            <title>Panel PI Vision VPS</title>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-            <meta http-equiv="refresh" content="60">
-        </head>
-        <body class="container mt-5 bg-light">
-            <div class="card shadow">
-                <div class="card-header bg-primary text-white d-flex justify-content-between">
-                    <h3 class="mb-0">Niveles de Combustible</h3>
-                    <span>Auto-refresh: 60s</span>
-                </div>
-                <div class="card-body">
-                    <table class="table table-hover">
-                        <thead class="table-dark"><tr><th>Descripción</th><th>Valor</th><th>Última Actualización</th></tr></thead>
-                        <tbody>
-                            {% for index, row in data.iterrows() %}
-                            <tr>
-                                <td>{{ row['descripcion'] }}</td>
-                                <td><span class="badge bg-success fs-6">{{ row['valor'] }}</span></td>
-                                <td class="text-muted">{{ row['fecha'] }}</td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-                <div class="card-footer text-center">
-                    <a href="/debug" class="btn btn-sm btn-outline-secondary">Ver Screenshot Driver</a>
-                </div>
-            </div>
-        </body>
-    </html>
-    """
-    return render_template_string(html, data=df)
+if authenticated and resultados:
+    df = pd.DataFrame(resultados, columns=['Descripción', 'Valor'])
 
-@app.route('/debug')
-def debug():
-    if os.path.exists(SCREENSHOT_PATH):
-        return send_file(SCREENSHOT_PATH, mimetype='image/png')
-    return "No hay captura disponible", 404
+    fecha_hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df.loc[len(df)] = ["Fecha y hora de captura", fecha_hora]
 
-if __name__ == "__main__":
-    # Inicializar DB limpia
-    if os.path.exists(DB_NAME): os.remove(DB_NAME)
-    conn = sqlite3.connect(DB_NAME)
-    conn.execute('CREATE TABLE lecturas (descripcion TEXT, valor TEXT, fecha TEXT)')
-    conn.close()
+    if getattr(sys, 'frozen', False):
+        script_directory = os.path.dirname(sys.executable)
+    else:
+        script_directory = os.path.dirname(os.path.abspath(__file__))
 
-    # Programar cada hora
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=ejecutar_scrapping, trigger="interval", hours=1)
-    scheduler.start()
+    output_file = os.path.join(script_directory, "datos_balance.xlsx")
 
-    # Primera ejecución
-    ejecutar_scrapping()
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Datos')
+        worksheet = writer.sheets['Datos']
+        worksheet.column_dimensions['A'].width = 50
 
-    app.run(host='0.0.0.0', port=5000)
+    print(Fore.GREEN + f"\nArchivo 'datos_balance.xlsx' generado con éxito en {script_directory}.")
+    abrir_excel(output_file)
 
+print(Fore.CYAN + "\nProceso completado.")
+input("\nPulse ENTER/RETURN para finalizar el programa.")
