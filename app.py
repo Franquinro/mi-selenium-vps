@@ -51,19 +51,27 @@ def ejecutar_scrapping():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
+    # Forzamos User-Agent de escritorio para evitar la vista de tablets que se ve en tu captura
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
     
     driver = webdriver.Chrome(options=options)
     try:
-        # Limpiamos la URL (quitamos el https:// para rearmarla)
-        clean_url = URL_BASE.replace("https://", "")
-        auth_url = f"https://{USERNAME}:{PASSWORD1}@{clean_url}"
+        # PASO 1: Autenticar en la raíz (esto guarda las cookies/sesión)
+        # Usamos la URL sin el fragmento #
+        auth_base = f"https://{USERNAME}:{PASSWORD1}@eworkerbrrc.endesa.es/PIVision/"
+        print("Autenticando en la base...")
+        driver.get(auth_base)
+        time.sleep(5) 
+
+        # PASO 2: Navegar al display real ahora que ya estamos logueados
+        print(f"Navegando al display: {URL_BASE}")
+        driver.get(URL_BASE)
         
-        driver.get(auth_url)
+        # Espera larga para que PI Vision cargue los datos (Angular es lento)
+        print("Esperando renderizado de datos (25s)...")
+        time.sleep(25) 
         
-        # Espera de cortesía para el renderizado inicial
-        time.sleep(15) 
-        
-        # Guardar captura para depuración (podrás verla en /debug)
+        # Guardar captura para confirmar que ya no vemos "Recent" sino el display
         driver.save_screenshot(SCREENSHOT_PATH)
 
         conn = sqlite3.connect(DB_NAME)
@@ -73,21 +81,28 @@ def ejecutar_scrapping():
         encontrados = 0
         for tag, descripcion in DATOS_A_BUSCAR:
             try:
-                # PI Vision usa el tag dentro del atributo 'title'
+                # XPath mejorado para PI Vision
                 xpath = f"//div[contains(@title, '{tag}')]"
-                # Esperamos poco por cada elemento ya que la página debería estar cargada
-                elemento = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, xpath)))
+                # Esperamos a que el elemento contenga algún texto (que no sea vacío)
+                elemento = WebDriverWait(driver, 10).until(
+                    EC.visibility_of_element_located((By.XPATH, xpath))
+                )
                 
+                # Intentamos sacar el texto de varias formas
                 valor = elemento.text.strip()
                 if not valor:
                     valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
                 
-                if not valor: valor = "Sin valor"
-                
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", (descripcion, valor, fecha_actual))
+                if not valor or valor == "": 
+                    valor = "Cargando..."
+
+                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
+                               (descripcion, valor, fecha_actual))
                 encontrados += 1
+                print(f"Capturado: {descripcion} = {valor}")
             except:
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", (descripcion, "Error", fecha_actual))
+                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha) VALUES (?, ?, ?)", 
+                               (descripcion, "No detectado", fecha_actual))
         
         conn.commit()
         conn.close()
@@ -95,7 +110,7 @@ def ejecutar_scrapping():
 
     except Exception as e:
         print(f"Error en Selenium: {e}")
-        if driver: driver.save_screenshot(SCREENSHOT_PATH)
+        driver.save_screenshot(SCREENSHOT_PATH)
     finally:
         driver.quit()
 
@@ -171,3 +186,4 @@ if __name__ == "__main__":
     ejecutar_scrapping()
     
     app.run(host='0.0.0.0', port=5000)
+
