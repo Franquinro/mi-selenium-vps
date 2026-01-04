@@ -3,4 +3,4 @@ pandas
 flask
 apscheduler
 openpyxl
-tqdm
+
