@@ -28,18 +28,19 @@ PI_BASE_URL = "https://eworkerbrrc.endesa.es/PIVision/"
 DISPLAY_ID = "88153"
 DISPLAY_HASH = f"#/Displays/{DISPLAY_ID}/Balance-Combustible-Bco?mode=kiosk&hidetoolbar&redirect=false"
 
+# Tupla con (tag, descripción, nivel_máximo_metros)
 DATOS_A_BUSCAR = (
-    ('\\PI-BRRC-S1\\BRRC00-0LBL111A', 'BARRANCO - TANQUE ALMACEN FO'),
-    ('\\PI-BRRC-S1\\BRRC00-0LBL111B', 'BARRANCO - TANQUE ALMACEN GO A'),
-    ('\\PI-BRRC-S1\\BRRC00-0LBL111C', 'BARRANCO - TANQUE ALMACEN GO B'),
-    ('\\PI-BRRC-S1\\BRRC036EGD20CL001JT01A', 'BARRANCO - TANQUE DIARIO GO 1'),
-    ('\\PI-BRRC-S1\\BRRC036EGD20CL002JT01A', 'BARRANCO - TANQUE DIARIO GO 2'),
-    ('\\PI-BRRC-S1\\BRRC036EGD20CL003JT01A', 'BARRANCO - TANQUE DIARIO GO 3'),
-    ('\\PI-BRRC-S1\\BRRC0210EGB30CL001JT01A', 'BARRANCO - TANQUE DIARIO GO 4'),
-    ('\\PI-BRRC-S1\\BRRC00-0LTBM127', 'BARRANCO - TANQUE GO VAPORES 80MW'),
-    ('\\PI-JINA-S1\\JINA00-145J045822', 'JINAMAR - NIVEL TANQUE TO2A'),
-    ('\\PI-JINA-S1\\JINAGT-208J021809', 'JINAMAR - NIVEL TQ GO 2 LM TURBINAS GAS'),
-    ('\\PI-JINA-S1\\JINA00-145J045826', 'JINAMAR - NIVEL GO DIESEL 4/5')
+    ('\\PI-BRRC-S1\\BRRC00-0LBL111A', 'TANQUE ALMACEN FO', 18),
+    ('\\PI-BRRC-S1\\BRRC00-0LBL111B', 'TANQUE ALMACEN GO A', 18),
+    ('\\PI-BRRC-S1\\BRRC00-0LBL111C', 'TANQUE ALMACEN GO B', 18),
+    ('\\PI-BRRC-S1\\BRRC036EGD20CL001JT01A', 'TANQUE DIARIO GO 1', 13),
+    ('\\PI-BRRC-S1\\BRRC036EGD20CL002JT01A', 'TANQUE DIARIO GO 2', 13),
+    ('\\PI-BRRC-S1\\BRRC036EGD20CL003JT01A', 'TANQUE DIARIO GO 3', 13),
+    ('\\PI-BRRC-S1\\BRRC0210EGB30CL001JT01A', 'TANQUE DIARIO GO 4', 13),
+    ('\\PI-BRRC-S1\\BRRC00-0LTBM127', 'TANQUE GO VAPORES 80MW', 7),
+    ('\\PI-JINA-S1\\JINA00-145J045822', 'NIVEL TANQUE TO2A', 16),
+    ('\\PI-JINA-S1\\JINAGT-208J021809', 'NIVEL TQ GO 2 LM TURBINAS GAS', 13),
+    ('\\PI-JINA-S1\\JINA00-145J045826', 'NIVEL GO DIESEL 4/5', 3)
 )
 
 def set_basic_auth_header(driver, user, password):
@@ -100,15 +101,17 @@ def ejecutar_scrapping():
         cursor.execute("DELETE FROM lecturas")
         fecha_actual = datetime.now().strftime("%H:%M:%S")
         
-        for tag, descripcion in DATOS_A_BUSCAR:
+        for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
             try:
                 elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
                 valor = (elemento.text or "").strip()
                 if not valor:
                     valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
-                cursor.execute("INSERT INTO lecturas VALUES (?, ?, ?)", (descripcion, valor or "---", fecha_actual))
+                cursor.execute("INSERT INTO lecturas VALUES (?, ?, ?, ?)", 
+                             (descripcion, valor or "---", fecha_actual, nivel_max))
             except:
-                cursor.execute("INSERT INTO lecturas VALUES (?, ?, ?)", (descripcion, "Error", fecha_actual))
+                cursor.execute("INSERT INTO lecturas VALUES (?, ?, ?, ?)", 
+                             (descripcion, "Error", fecha_actual, nivel_max))
         
         conn.commit()
         conn.close()
@@ -127,8 +130,10 @@ def index():
         conn = sqlite3.connect(DB_NAME)
         df = pd.read_sql_query("SELECT * FROM lecturas", conn)
         conn.close()
-        data_barranco = [row for row in df.values.tolist() if row[0].startswith('BARRANCO')]
-        data_jinamar = [row for row in df.values.tolist() if row[0].startswith('JINAMAR')]
+        
+        # Separar por planta (BARRANCO son los primeros 8, JINAMAR los últimos 3)
+        data_barranco = df.iloc[:8].values.tolist()
+        data_jinamar = df.iloc[8:].values.tolist()
     except:
         data_barranco = []
         data_jinamar = []
@@ -256,7 +261,7 @@ def index():
                 display: flex;
                 justify-content: space-between;
                 align-items: flex-start;
-                margin-bottom: 16px;
+                margin-bottom: 12px;
             }
             
             .tank-name {
@@ -268,7 +273,7 @@ def index():
             }
             
             .timestamp {
-                font-size: 0.8em;
+                font-size: 0.75em;
                 color: #718096;
                 white-space: nowrap;
                 margin-left: 12px;
@@ -281,7 +286,7 @@ def index():
                 display: flex;
                 align-items: baseline;
                 gap: 8px;
-                margin-bottom: 14px;
+                margin-bottom: 8px;
             }
             
             .value-number {
@@ -295,6 +300,13 @@ def index():
                 font-size: 1.1em;
                 color: #a0aec0;
                 font-weight: 600;
+            }
+            
+            .max-indicator {
+                font-size: 0.85em;
+                color: #4299e1;
+                font-weight: 600;
+                margin-bottom: 10px;
             }
             
             .level-indicator {
@@ -389,19 +401,23 @@ def index():
                 {% for row in data_barranco %}
                 <div class="widget">
                     <div class="widget-header">
-                        <div class="tank-name">{{ row[0].replace('BARRANCO - ', '') }}</div>
+                        <div class="tank-name">{{ row[0] }}</div>
                         <div class="timestamp">{{ row[2] }}</div>
                     </div>
                     <div class="value-display">
-                        <div class="value-number">{{ row[1].replace('%', '').replace('m³', '').strip() if row[1] not in ['Error', '---'] else row[1] }}</div>
-                        <div class="value-unit">{% if '%' in row[1] %}%{% elif 'm³' in row[1] %}m³{% endif %}</div>
+                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').strip() %}
+                        <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row[1] }}</div>
+                        <div class="value-unit">{% if valor_limpio not in ['Error', '---'] %}m{% endif %}</div>
                     </div>
+                    <div class="max-indicator">Máximo: {{ row[3] }} m</div>
                     <div class="level-indicator">
-                        {% set valor_num = row[1].replace('%', '').replace('m³', '').strip() %}
-                        {% if valor_num.replace('.', '').replace(',', '').isdigit() %}
-                            {% set nivel = valor_num|float %}
-                            {% set clase_nivel = 'level-high' if nivel >= 60 else ('level-medium' if nivel >= 30 else 'level-low') %}
-                            <div class="level-fill {{ clase_nivel }}" style="width: {{ nivel }}%">{{ nivel }}%</div>
+                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').replace(',', '.').strip() %}
+                        {% if valor_limpio.replace('.', '', 1).isdigit() %}
+                            {% set nivel_actual = valor_limpio|float %}
+                            {% set nivel_max = row[3]|float %}
+                            {% set porcentaje = (nivel_actual / nivel_max * 100)|round(1) %}
+                            {% set clase_nivel = 'level-high' if porcentaje >= 60 else ('level-medium' if porcentaje >= 30 else 'level-low') %}
+                            <div class="level-fill {{ clase_nivel }}" style="width: {{ porcentaje }}%">{{ porcentaje }}%</div>
                         {% else %}
                             <div class="level-fill level-error" style="width: 100%">{{ row[1] }}</div>
                         {% endif %}
@@ -420,19 +436,23 @@ def index():
                 {% for row in data_jinamar %}
                 <div class="widget">
                     <div class="widget-header">
-                        <div class="tank-name">{{ row[0].replace('JINAMAR - ', '') }}</div>
+                        <div class="tank-name">{{ row[0] }}</div>
                         <div class="timestamp">{{ row[2] }}</div>
                     </div>
                     <div class="value-display">
-                        <div class="value-number">{{ row[1].replace('%', '').replace('m³', '').strip() if row[1] not in ['Error', '---'] else row[1] }}</div>
-                        <div class="value-unit">{% if '%' in row[1] %}%{% elif 'm³' in row[1] %}m³{% endif %}</div>
+                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').strip() %}
+                        <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row[1] }}</div>
+                        <div class="value-unit">{% if valor_limpio not in ['Error', '---'] %}m{% endif %}</div>
                     </div>
+                    <div class="max-indicator">Máximo: {{ row[3] }} m</div>
                     <div class="level-indicator">
-                        {% set valor_num = row[1].replace('%', '').replace('m³', '').strip() %}
-                        {% if valor_num.replace('.', '').replace(',', '').isdigit() %}
-                            {% set nivel = valor_num|float %}
-                            {% set clase_nivel = 'level-high' if nivel >= 60 else ('level-medium' if nivel >= 30 else 'level-low') %}
-                            <div class="level-fill {{ clase_nivel }}" style="width: {{ nivel }}%">{{ nivel }}%</div>
+                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').replace(',', '.').strip() %}
+                        {% if valor_limpio.replace('.', '', 1).isdigit() %}
+                            {% set nivel_actual = valor_limpio|float %}
+                            {% set nivel_max = row[3]|float %}
+                            {% set porcentaje = (nivel_actual / nivel_max * 100)|round(1) %}
+                            {% set clase_nivel = 'level-high' if porcentaje >= 60 else ('level-medium' if porcentaje >= 30 else 'level-low') %}
+                            <div class="level-fill {{ clase_nivel }}" style="width: {{ porcentaje }}%">{{ porcentaje }}%</div>
                         {% else %}
                             <div class="level-fill level-error" style="width: 100%">{{ row[1] }}</div>
                         {% endif %}
@@ -456,7 +476,7 @@ def debug():
 
 if __name__ == "__main__":
     conn = sqlite3.connect(DB_NAME)
-    conn.execute('CREATE TABLE IF NOT EXISTS lecturas (descripcion TEXT, valor TEXT, fecha TEXT)')
+    conn.execute('CREATE TABLE IF NOT EXISTS lecturas (descripcion TEXT, valor TEXT, fecha TEXT, nivel_max INTEGER)')
     conn.close()
 
     scheduler = BackgroundScheduler()
