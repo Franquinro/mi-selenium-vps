@@ -1,51 +1,100 @@
+# app.py
 import os
 import time
 import base64
 import sqlite3
+import re
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import pandas as pd
-from datetime import datetime
 from flask import Flask, render_template_string, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN ---
+# -------------------
+# CONFIGURACIÓN
+# -------------------
+TZ = ZoneInfo("Atlantic/Canary")
+
 USERNAME = r"enelint\es43282213p"
 PASSWORD1 = os.getenv("SCRAP_PASS1", "")
-PASSWORD2 = os.getenv("SCRAP_PASS2", "")
+PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # (se mantiene por si lo necesitas después)
+
 DB_NAME = "temp_niveles.db"
 SCREENSHOT_PATH = "debug_vps.png"
 WINDOW_W, WINDOW_H = 1920, 1080
+
 PI_BASE_URL = "https://eworkerbrrc.endesa.es/PIVision/"
 DISPLAY_ID = "88153"
 DISPLAY_HASH = f"#/Displays/{DISPLAY_ID}/Balance-Combustible-Bco?mode=kiosk&hidetoolbar&redirect=false"
 
+# Tupla con (tag, descripción, nivel_máximo_metros)
 DATOS_A_BUSCAR = (
-    ('\\PI-BRRC-S1\\BRRC00-0LBL111A', 'TANQUE ALMACEN FO', 18),
-    ('\\PI-BRRC-S1\\BRRC00-0LBL111B', 'TANQUE ALMACEN GO A', 18),
-    ('\\PI-BRRC-S1\\BRRC00-0LBL111C', 'TANQUE ALMACEN GO B', 18),
-    ('\\PI-BRRC-S1\\BRRC036EGD20CL001JT01A', 'TANQUE DIARIO GO 1', 13),
-    ('\\PI-BRRC-S1\\BRRC036EGD20CL002JT01A', 'TANQUE DIARIO GO 2', 13),
-    ('\\PI-BRRC-S1\\BRRC036EGD20CL003JT01A', 'TANQUE DIARIO GO 3', 13),
-    ('\\PI-BRRC-S1\\BRRC0210EGB30CL001JT01A', 'TANQUE DIARIO GO 4', 13),
-    ('\\PI-BRRC-S1\\BRRC00-0LTBM127', 'TANQUE GO VAPORES 80MW', 7),
-    ('\\PI-JINA-S1\\JINA00-145J045822', 'NIVEL TANQUE TO2A', 16),
-    ('\\PI-JINA-S1\\JINAGT-208J021809', 'NIVEL TQ GO 2 LM TURBINAS GAS', 13),
-    ('\\PI-JINA-S1\\JINA00-145J045826', 'NIVEL GO DIESEL 4/5', 3)
+    (r"\PI-BRRC-S1\BRRC00-0LBL111A", "TANQUE ALMACEN FO", 18),
+    (r"\PI-BRRC-S1\BRRC00-0LBL111B", "TANQUE ALMACEN GO A", 18),
+    (r"\PI-BRRC-S1\BRRC00-0LBL111C", "TANQUE ALMACEN GO B", 18),
+    (r"\PI-BRRC-S1\BRRC036EGD20CL001JT01A", "TANQUE DIARIO GO 1", 13),
+    (r"\PI-BRRC-S1\BRRC036EGD20CL002JT01A", "TANQUE DIARIO GO 2", 13),
+    (r"\PI-BRRC-S1\BRRC036EGD20CL003JT01A", "TANQUE DIARIO GO 3", 13),
+    (r"\PI-BRRC-S1\BRRC0210EGB30CL001JT01A", "TANQUE DIARIO GO 4", 13),
+    (r"\PI-BRRC-S1\BRRC00-0LTBM127", "TANQUE GO VAPORES 80MW", 7),
+    (r"\PI-JINA-S1\JINA00-145J045822", "NIVEL TANQUE TO2A", 16),
+    (r"\PI-JINA-S1\JINAGT-208J021809", "NIVEL TQ GO 2 LM TURBINAS GAS", 13),
+    (r"\PI-JINA-S1\JINA00-145J045826", "NIVEL GO DIESEL 4/5", 3),
 )
 
+ORDER_TAGS = [t[0] for t in DATOS_A_BUSCAR]
+BARRANCO_TAGS = set(ORDER_TAGS[:8])
+JINAMAR_TAGS = set(ORDER_TAGS[8:])
+
+
+# -------------------
+# DB
+# -------------------
+def _db_connect():
+    conn = sqlite3.connect(DB_NAME, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+
+def init_db():
+    conn = _db_connect()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lecturas (
+            tag TEXT NOT NULL,
+            descripcion TEXT NOT NULL,
+            valor TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            nivel_max REAL NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lecturas_tag_ts ON lecturas(tag, ts);")
+    conn.close()
+
+
+# -------------------
+# SCRAPING
+# -------------------
 def set_basic_auth_header(driver, user, password):
     token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
     driver.execute_cdp_cmd("Network.enable", {})
-    driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {
-        "headers": {"Authorization": f"Basic {token}"}
-    })
+    driver.execute_cdp_cmd(
+        "Network.setExtraHTTPHeaders",
+        {"headers": {"Authorization": f"Basic {token}"}},
+    )
+
 
 def build_driver():
     options = Options()
@@ -55,29 +104,41 @@ def build_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
     driver = webdriver.Chrome(options=options)
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    })
-    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+    )
+
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
     driver.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": ua, "platform": "Windows"})
     return driver
 
+
 def ejecutar_scrapping():
-    print(f"[{datetime.now()}] Iniciando captura...")
+    ts_now = datetime.now(TZ).isoformat(timespec="seconds")
+    print(f"[{ts_now}] Iniciando captura...")
+
     driver = build_driver()
     try:
         set_basic_auth_header(driver, USERNAME, PASSWORD1)
+
         driver.get(PI_BASE_URL)
         time.sleep(5)
-        
+
         target_url = PI_BASE_URL + DISPLAY_HASH
         print(f"Navegando a: {target_url}")
         driver.get(target_url)
-        
+
         primer_tag = DATOS_A_BUSCAR[0][0]
         print(f"Esperando tag: {primer_tag}...")
-        
+
         try:
             WebDriverWait(driver, 60).until(
                 EC.presence_of_element_located((By.XPATH, f"//div[contains(@title, '{primer_tag}')]"))
@@ -90,117 +151,250 @@ def ejecutar_scrapping():
         time.sleep(5)
         driver.save_screenshot(SCREENSHOT_PATH)
 
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM lecturas WHERE timestamp < datetime('now', '-48 hours')")
-        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+        conn = _db_connect()
+        cur = conn.cursor()
+
         for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
             try:
                 elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
                 valor = (elemento.text or "").strip()
                 if not valor:
                     valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, timestamp, nivel_max) VALUES (?, ?, ?, ?)", 
-                               (descripcion, valor or "---", fecha_actual, float(nivel_max)))
-            except:
-                cursor.execute("INSERT INTO lecturas (descripcion, valor, timestamp, nivel_max) VALUES (?, ?, ?, ?)", 
-                               (descripcion, "Error", fecha_actual, float(nivel_max)))
-        
+
+                cur.execute(
+                    "INSERT INTO lecturas(tag, descripcion, valor, ts, nivel_max) VALUES (?, ?, ?, ?, ?)",
+                    (tag, descripcion, valor or "---", ts_now, float(nivel_max)),
+                )
+            except Exception:
+                cur.execute(
+                    "INSERT INTO lecturas(tag, descripcion, valor, ts, nivel_max) VALUES (?, ?, ?, ?, ?)",
+                    (tag, descripcion, "Error", ts_now, float(nivel_max)),
+                )
+
         conn.commit()
         conn.close()
+
         print("Captura finalizada con éxito.")
 
     except Exception as e:
         print(f"Error detectado: {e}")
-        try: 
+        try:
             driver.save_screenshot(SCREENSHOT_PATH)
-        except: 
+        except Exception:
             pass
     finally:
         driver.quit()
 
-def generate_sparkline(df, desc):
-    now = pd.to_datetime(datetime.now())
-    tank_df = df[df['descripcion'] == desc].copy()
-    tank_df['ts'] = pd.to_datetime(tank_df['timestamp'])
-    recent = tank_df[tank_df['ts'] >= (now - pd.Timedelta(hours=24))].sort_values('ts')
-    if len(recent) < 2:
-        return '<svg width="100" height="20"><text x="10" y="15" font-size="11" fill="#888">Sin datos</text></svg>'
-    
-    values_str = recent['valor'].values
-    values = []
-    for vs in values_str:
-        vcl = str(vs).replace('m', '').replace('³', '').replace(',', '.').strip()
-        try:
-            values.append(float(vcl))
-        except ValueError:
-            continue
-    
-    if len(values) < 2:
-        return '<svg width="100" height="20"><text x="20" y="15" font-size="11" fill="#666">Pocos datos</text></svg>'
-    
-    min_v, max_v = min(values), max(values)
-    if max_v == min_v:
-        return '<svg width="100" height="20"><rect width="100" height="4" y="8" fill="#666"/><text x="35" y="15" font-size="10" fill="#888">Constante</text></svg>'
-    
-    height = 14
-    points = []
-    n_points = len(values)
-    for i, v in enumerate(values):
-        norm = (v - min_v) / (max_v - min_v)
-        x = (i / (n_points - 1)) * 98 + 1
-        y = 17 - (norm * height)
-        points.append(f"{x:.1f},{y:.1f}")
-    
-    svg = f'''<svg width="100" height="20" viewBox="0 0 100 20">
-        <polyline points="1,18 {' '.join(points)} 99,18" fill="none" stroke="#00d4aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        <line x1="1" y1="18" x2="99" y2="18" stroke="#555" stroke-width="1" opacity="0.4"/>
-        <rect x="0" y="0" width="100" height="20" rx="4" fill="rgba(0,0,0,0.15)" opacity="0.6"/>
-    </svg>'''
-    return svg
 
-@app.route('/')
-def index():
+# -------------------
+# TENDENCIA (24h)
+# -------------------
+_float_re = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+
+
+def parse_float(valor_texto: str):
+    if not valor_texto:
+        return None
+    m = _float_re.search(valor_texto.replace("³", ""))
+    if not m:
+        return None
     try:
-        conn = sqlite3.connect(DB_NAME)
-        df = pd.read_sql_query("SELECT * FROM lecturas ORDER BY timestamp DESC", conn)
-        conn.close()
-        
-        # Últimos valores por tanque
-        latest_df = df.loc[df.groupby('descripcion')['timestamp'].idxmax()]
-        
-        # Datos Barranco (primeros 8)
-        data_barranco = []
-        for i in range(8):
-            desc = DATOS_A_BUSCAR[i][1]
-            mask = latest_df['descripcion'] == desc
-            if mask.any():
-                row = latest_df[mask].iloc[0]
-                data_barranco.append([desc, row['valor'], row['timestamp'], row['nivel_max']])
-            else:
-                data_barranco.append([desc, '---', datetime.now().strftime("%Y-%m-%d %H:%M:%S"), DATOS_A_BUSCAR[i][2]])
-        
-        # Datos Jinamar (siguientes 3)
-        data_jinamar = []
-        for i in range(8, 11):
-            desc = DATOS_A_BUSCAR[i][1]
-            mask = latest_df['descripcion'] == desc
-            if mask.any():
-                row = latest_df[mask].iloc[0]
-                data_jinamar.append([desc, row['valor'], row['timestamp'], row['nivel_max']])
-            else:
-                data_jinamar.append([desc, '---', datetime.now().strftime("%Y-%m-%d %H:%M:%S"), DATOS_A_BUSCAR[i][2]])
-        
-        # Sparklines para tendencias 24h
-        all_descs = [d[1] for d in DATOS_A_BUSCAR]
-        trend_svgs = {desc: generate_sparkline(df, desc) for desc in all_descs}
-        
-    except Exception as e:
-        print(f"Error en index: {e}")
-        data_barranco = []
-        data_jinamar = []
-        trend_svgs = {}
+        return float(m.group(0).replace(",", "."))
+    except Exception:
+        return None
+
+
+def make_sparkline_svg(values, width=120, height=28, padding=2):
+    """
+    Devuelve un pequeño SVG (sparkline) con los valores normalizados.
+    """
+    if not values or len(values) < 2:
+        return (
+            f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
+            f'xmlns="http://www.w3.org/2000/svg">'
+            f'<path d="M {padding} {height/2:.2f} L {width-padding} {height/2:.2f}" '
+            f'class="sparkline-path sparkline-flat"/></svg>'
+        )
+
+    vmin = min(values)
+    vmax = max(values)
+    if abs(vmax - vmin) < 1e-9:
+        y = height / 2
+        return (
+            f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
+            f'xmlns="http://www.w3.org/2000/svg">'
+            f'<path d="M {padding} {y:.2f} L {width-padding} {y:.2f}" '
+            f'class="sparkline-path sparkline-flat"/></svg>'
+        )
+
+    usable_w = width - 2 * padding
+    usable_h = height - 2 * padding
+    step = usable_w / (len(values) - 1)
+
+    pts = []
+    for i, val in enumerate(values):
+        x = padding + i * step
+        t = (val - vmin) / (vmax - vmin)  # 0..1
+        y = padding + (1.0 - t) * usable_h  # invertido en SVG
+        pts.append((x, y))
+
+    d = f"M {pts[0][0]:.2f} {pts[0][1]:.2f} " + " ".join(
+        f"L {x:.2f} {y:.2f}" for x, y in pts[1:]
+    )
+
+    return (
+        f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'<path d="{d}" class="sparkline-path"/></svg>'
+    )
+
+
+def build_trends(df_24h: pd.DataFrame):
+    """
+    df_24h: columnas [tag, ts, valor]
+    Devuelve dict: tag -> {svg, text, cls}
+    """
+    trends = {}
+
+    if df_24h.empty:
+        return trends
+
+    # Normalizamos timestamp a datetime, y valor a float
+    df = df_24h.copy()
+    df["dt"] = df["ts"].apply(lambda s: datetime.fromisoformat(s))
+    df["num"] = df["valor"].apply(parse_float)
+    df = df.dropna(subset=["num"]).sort_values(["tag", "dt"])
+
+    for tag, g in df.groupby("tag"):
+        vals = g["num"].tolist()
+        if len(vals) < 2:
+            trends[tag] = {
+                "svg": make_sparkline_svg([]),
+                "text": "24h: —",
+                "cls": "trend-flat",
+            }
+            continue
+
+        delta = vals[-1] - vals[0]
+        if abs(delta) < 0.01:
+            cls = "trend-flat"
+        elif delta > 0:
+            cls = "trend-up"
+        else:
+            cls = "trend-down"
+
+        trends[tag] = {
+            "svg": make_sparkline_svg(vals[-96:]),  # ideal: 96 puntos (24h a 15 min)
+            "text": f"24h: {delta:+.2f} m",
+            "cls": cls,
+        }
+
+    return trends
+
+
+# -------------------
+# WEB
+# -------------------
+@app.route("/")
+def index():
+    # Cargamos último valor por tag + datos 24h para tendencia
+    conn = _db_connect()
+
+    # Última lectura por tag
+    df_latest = pd.read_sql_query(
+        """
+        SELECT l.tag, l.descripcion, l.valor, l.ts, l.nivel_max
+        FROM lecturas l
+        JOIN (
+            SELECT tag, MAX(ts) AS max_ts
+            FROM lecturas
+            GROUP BY tag
+        ) m ON l.tag = m.tag AND l.ts = m.max_ts
+        """,
+        conn,
+    )
+
+    # Últimas 24 horas
+    ts_min = (datetime.now(TZ) - timedelta(hours=24)).isoformat(timespec="seconds")
+    df_24h = pd.read_sql_query(
+        "SELECT tag, ts, valor FROM lecturas WHERE ts >= ?",
+        conn,
+        params=(ts_min,),
+    )
+
+    conn.close()
+
+    trends = build_trends(df_24h)
+
+    # Mapa rápido de latest por tag
+    latest_by_tag = {}
+    if not df_latest.empty:
+        for _, r in df_latest.iterrows():
+            latest_by_tag[r["tag"]] = {
+                "tag": r["tag"],
+                "descripcion": r["descripcion"],
+                "valor": r["valor"],
+                "ts": r["ts"],
+                "nivel_max": r["nivel_max"],
+            }
+
+    # Construimos lista ordenada y con tendencia
+    cards = []
+    ultima_captura_dt = None
+
+    for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
+        rec = latest_by_tag.get(tag)
+        if rec:
+            try:
+                dt = datetime.fromisoformat(rec["ts"])
+                # Si viene con offset, perfecto; si no, lo tratamos como TZ local
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=TZ)
+            except Exception:
+                dt = None
+
+            time_str = dt.astimezone(TZ).strftime("%H:%M") if dt else "--:--"
+            if dt and (ultima_captura_dt is None or dt > ultima_captura_dt):
+                ultima_captura_dt = dt
+
+            t = trends.get(tag, None)
+            spark_svg = t["svg"] if t else make_sparkline_svg([])
+            trend_text = t["text"] if t else "24h: —"
+            trend_cls = t["cls"] if t else "trend-flat"
+
+            cards.append(
+                {
+                    "tag": tag,
+                    "descripcion": rec["descripcion"],
+                    "valor": rec["valor"],
+                    "hora": time_str,
+                    "nivel_max": rec["nivel_max"],
+                    "spark_svg": spark_svg,
+                    "trend_text": trend_text,
+                    "trend_cls": trend_cls,
+                }
+            )
+        else:
+            # No hay datos aún
+            cards.append(
+                {
+                    "tag": tag,
+                    "descripcion": descripcion,
+                    "valor": "---",
+                    "hora": "--:--",
+                    "nivel_max": float(nivel_max),
+                    "spark_svg": make_sparkline_svg([]),
+                    "trend_text": "24h: —",
+                    "trend_cls": "trend-flat",
+                }
+            )
+
+    data_barranco = [c for c in cards if c["tag"] in BARRANCO_TAGS]
+    data_jinamar = [c for c in cards if c["tag"] in JINAMAR_TAGS]
+
+    ultima_captura_str = (
+        ultima_captura_dt.astimezone(TZ).strftime("%d/%m/%Y %H:%M") if ultima_captura_dt else "—"
+    )
 
     html = """
 <!DOCTYPE html>
@@ -212,45 +406,247 @@ def index():
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%); color: #e0e0e0; padding: 12px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
-        .dashboard-header { text-align: center; margin-bottom: 15px; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 10px; backdrop-filter: blur(10px); box-shadow: 0 3px 15px rgba(0,0,0,0.3); width: 80%; }
-        .dashboard-header h1 { font-size: 1.6em; font-weight: 700; color: #ffffff; margin-bottom: 4px; text-shadow: 0 2px 8px rgba(0,0,0,0.5); }
-        .dashboard-header .subtitle { font-size: 0.8em; color: #a0aec0; letter-spacing: 0.4px; }
-        .plant-container { background: rgba(255,255,255,0.08); border-radius: 12px; padding: 15px; margin-bottom: 15px; box-shadow: 0 6px 25px rgba(0,0,0,0.3); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); width: 80%; }
-        .plant-title { font-size: 1.2em; font-weight: 700; color: #ffffff; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 3px solid; display: flex; align-items: center; gap: 10px; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            color: #e0e0e0;
+            padding: 12px;
+            min-height: 100vh;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 15px;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 3px 15px rgba(0, 0, 0, 0.3);
+            width: 80%;
+        }
+
+        .dashboard-header h1 {
+            font-size: 1.6em;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 4px;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+        }
+
+        .dashboard-header .subtitle {
+            font-size: 0.8em;
+            color: #a0aec0;
+            letter-spacing: 0.4px;
+        }
+
+        .plant-container {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 6px 25px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            width: 80%;
+        }
+
+        .plant-title {
+            font-size: 1.2em;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 3px solid;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
         .plant-container.barranco .plant-title { border-color: #4299e1; }
         .plant-container.jinamar .plant-title { border-color: #48bb78; }
-        .plant-icon { width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 1.1em; font-weight: bold; }
-        .plant-container.barranco .plant-icon { background: linear-gradient(135deg, #4299e1, #3182ce); color: white; }
-        .plant-container.jinamar .plant-icon { background: linear-gradient(135deg, #48bb78, #38a169); color: white; }
-        .widgets-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-        .widget { background: rgba(255,255,255,0.06); border-radius: 10px; padding: 14px; border: 1px solid rgba(255,255,255,0.08); transition: all 0.3s ease; box-shadow: 0 3px 12px rgba(0,0,0,0.2); }
-        .widget:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0,0,0,0.4); border-color: rgba(255,255,255,0.15); }
-        .widget-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
-        .tank-name { font-weight: 700; font-size: 0.85em; color: #ffffff; line-height: 1.2; flex: 1; }
-        .timestamp { font-size: 0.65em; color: #718096; white-space: nowrap; padding: 3px 7px; background: rgba(0,0,0,0.2); border-radius: 5px; }
-        .value-display { display: flex; align-items: baseline; gap: 6px; margin-bottom: 6px; }
-        .value-number { font-size: 2em; font-weight: 700; color: #ffffff; line-height: 1; }
-        .value-unit { font-size: 0.9em; color: #a0aec0; font-weight: 600; }
-        .max-indicator { font-size: 0.7em; color: #4299e1; font-weight: 600; margin-bottom: 4px; }
-        .trend-container { height: 24px; margin: 6px 0; display: flex; align-items: center; justify-content: center; border-radius: 4px; background: rgba(0,0,0,0.1); }
-        .level-indicator { position: relative; height: 22px; background: rgba(0,0,0,0.3); border-radius: 11px; overflow: hidden; box-shadow: inset 0 2px 6px rgba(0,0,0,0.3); margin-top: 4px; }
-        .level-fill { height: 100%; border-radius: 11px; transition: width 0.8s ease, background 0.3s ease; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; font-size: 0.68em; font-weight: 700; color: white; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+
+        .plant-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1em;
+            font-weight: bold;
+        }
+
+        .plant-container.barranco .plant-icon {
+            background: linear-gradient(135deg, #4299e1, #3182ce);
+            color: white;
+        }
+
+        .plant-container.jinamar .plant-icon {
+            background: linear-gradient(135deg, #48bb78, #38a169);
+            color: white;
+        }
+
+        .widgets-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+
+        .widget {
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            padding: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            transition: all 0.3s ease;
+            box-shadow: 0 3px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .widget:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .widget-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+
+        .tank-name {
+            font-weight: 700;
+            font-size: 0.85em;
+            color: #ffffff;
+            line-height: 1.2;
+            flex: 1;
+        }
+
+        .timestamp {
+            font-size: 0.65em;
+            color: #718096;
+            white-space: nowrap;
+            margin-left: 8px;
+            padding: 3px 7px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 5px;
+        }
+
+        .value-display {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+
+        .value-number {
+            font-size: 2em;
+            font-weight: 700;
+            color: #ffffff;
+            line-height: 1;
+        }
+
+        .value-unit {
+            font-size: 0.9em;
+            color: #a0aec0;
+            font-weight: 600;
+        }
+
+        .max-indicator {
+            font-size: 0.7em;
+            color: #4299e1;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .level-indicator {
+            position: relative;
+            height: 22px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 11px;
+            overflow: hidden;
+            box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .level-fill {
+            height: 100%;
+            border-radius: 11px;
+            transition: width 0.8s ease, background 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 10px;
+            font-size: 0.68em;
+            font-weight: 700;
+            color: white;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+        }
+
         .level-low { background: linear-gradient(90deg, #f56565, #e53e3e); }
         .level-medium { background: linear-gradient(90deg, #ed8936, #dd6b20); }
         .level-high { background: linear-gradient(90deg, #48bb78, #38a169); }
         .level-error { background: linear-gradient(90deg, #718096, #4a5568); }
-        @media (max-width: 1600px) { .widgets-grid { grid-template-columns: repeat(3, 1fr); } }
-        @media (max-width: 1200px) { .widgets-grid { grid-template-columns: repeat(2, 1fr); } .dashboard-header, .plant-container { width: 90%; } }
-        @media (max-width: 768px) { .widgets-grid { grid-template-columns: 1fr; } .dashboard-header, .plant-container { width: 95%; } .dashboard-header h1 { font-size: 1.3em; } .value-number { font-size: 1.8em; } }
+
+        /* Tendencia 24h */
+        .trend {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .sparkline { width: 120px; height: 28px; display: block; }
+        .sparkline-path {
+            fill: none;
+            stroke-width: 2.2;
+            stroke: rgba(255, 255, 255, 0.75);
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .sparkline-flat { stroke: rgba(255, 255, 255, 0.35); }
+
+        .trend-meta {
+            font-size: 0.72em;
+            color: #cbd5e0;
+            padding: 3px 8px;
+            background: rgba(0,0,0,0.18);
+            border-radius: 6px;
+            white-space: nowrap;
+        }
+
+        .trend-up { color: #9ae6b4; }
+        .trend-down { color: #feb2b2; }
+        .trend-flat { color: #cbd5e0; }
+
+        @media (max-width: 1600px) {
+            .widgets-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+
+        @media (max-width: 1200px) {
+            .widgets-grid { grid-template-columns: repeat(2, 1fr); }
+            .dashboard-header, .plant-container { width: 90%; }
+        }
+
+        @media (max-width: 768px) {
+            .widgets-grid { grid-template-columns: 1fr; }
+            .dashboard-header, .plant-container { width: 95%; }
+            .dashboard-header h1 { font-size: 1.3em; }
+            .value-number { font-size: 1.8em; }
+        }
     </style>
 </head>
 <body>
     <div class="dashboard-header">
         <h1>🏭 Monitor de Niveles de Combustible</h1>
-        <div class="subtitle">Sistema PI Vision - Actualización Automática (cada 15 min)</div>
+        <div class="subtitle">Sistema PI Vision · Última captura: {{ ultima_captura }}</div>
     </div>
-    
+
     <div class="plant-container barranco">
         <div class="plant-title">
             <div class="plant-icon">B</div>
@@ -260,33 +656,40 @@ def index():
             {% for row in data_barranco %}
             <div class="widget">
                 <div class="widget-header">
-                    <div class="tank-name">{{ row[0] }}</div>
-                    <div class="timestamp">{{ row[2].split()[1][:5] if row[2] else '' }}</div>
+                    <div class="tank-name">{{ row.descripcion }}</div>
+                    <div class="timestamp">{{ row.hora }}</div>
                 </div>
+
                 <div class="value-display">
-                    {% set valor_limpio = row[1].replace('m', '').replace('³', '').strip() %}
-                    <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row[1] }}</div>
+                    {% set valor_limpio = row.valor.replace('m', '').replace('³', '').strip() %}
+                    <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row.valor }}</div>
                     <div class="value-unit">{% if valor_limpio not in ['Error', '---'] %}m{% endif %}</div>
                 </div>
-                <div class="max-indicator">Máx: {{ "%.1f"|format(row[3]) }} m</div>
-                <div class="trend-container">{{ trend_svgs[row[0]] | safe }}</div>
+
+                <div class="max-indicator">Máximo: {{ row.nivel_max }} m</div>
+
                 <div class="level-indicator">
-                    {% set valor_limpio = row[1].replace('m', '').replace('³', '').replace(',', '.').strip() %}
-                    {% if valor_limpio.replace('.', '', 1).replace('-','').isdigit() %}
-                        {% set nivel_actual = valor_limpio|float %}
-                        {% set nivel_max = row[3]|float %}
+                    {% set v = row.valor.replace('m', '').replace('³', '').replace(',', '.').strip() %}
+                    {% if v.replace('.', '', 1).isdigit() %}
+                        {% set nivel_actual = v|float %}
+                        {% set nivel_max = row.nivel_max|float %}
                         {% set porcentaje = (nivel_actual / nivel_max * 100)|round(1) %}
                         {% set clase_nivel = 'level-high' if porcentaje >= 60 else ('level-medium' if porcentaje >= 30 else 'level-low') %}
                         <div class="level-fill {{ clase_nivel }}" style="width: {{ porcentaje }}%">{{ porcentaje }}%</div>
                     {% else %}
-                        <div class="level-fill level-error" style="width: 100%">{{ row[1] }}</div>
+                        <div class="level-fill level-error" style="width: 100%">{{ row.valor }}</div>
                     {% endif %}
+                </div>
+
+                <div class="trend">
+                    <div class="spark-wrap">{{ row.spark_svg | safe }}</div>
+                    <div class="trend-meta {{ row.trend_cls }}">{{ row.trend_text }}</div>
                 </div>
             </div>
             {% endfor %}
         </div>
     </div>
-    
+
     <div class="plant-container jinamar">
         <div class="plant-title">
             <div class="plant-icon">J</div>
@@ -296,27 +699,34 @@ def index():
             {% for row in data_jinamar %}
             <div class="widget">
                 <div class="widget-header">
-                    <div class="tank-name">{{ row[0] }}</div>
-                    <div class="timestamp">{{ row[2].split()[1][:5] if row[2] else '' }}</div>
+                    <div class="tank-name">{{ row.descripcion }}</div>
+                    <div class="timestamp">{{ row.hora }}</div>
                 </div>
+
                 <div class="value-display">
-                    {% set valor_limpio = row[1].replace('m', '').replace('³', '').strip() %}
-                    <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row[1] }}</div>
+                    {% set valor_limpio = row.valor.replace('m', '').replace('³', '').strip() %}
+                    <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row.valor }}</div>
                     <div class="value-unit">{% if valor_limpio not in ['Error', '---'] %}m{% endif %}</div>
                 </div>
-                <div class="max-indicator">Máx: {{ "%.1f"|format(row[3]) }} m</div>
-                <div class="trend-container">{{ trend_svgs[row[0]] | safe }}</div>
+
+                <div class="max-indicator">Máximo: {{ row.nivel_max }} m</div>
+
                 <div class="level-indicator">
-                    {% set valor_limpio = row[1].replace('m', '').replace('³', '').replace(',', '.').strip() %}
-                    {% if valor_limpio.replace('.', '', 1).replace('-','').isdigit() %}
-                        {% set nivel_actual = valor_limpio|float %}
-                        {% set nivel_max = row[3]|float %}
+                    {% set v = row.valor.replace('m', '').replace('³', '').replace(',', '.').strip() %}
+                    {% if v.replace('.', '', 1).isdigit() %}
+                        {% set nivel_actual = v|float %}
+                        {% set nivel_max = row.nivel_max|float %}
                         {% set porcentaje = (nivel_actual / nivel_max * 100)|round(1) %}
                         {% set clase_nivel = 'level-high' if porcentaje >= 60 else ('level-medium' if porcentaje >= 30 else 'level-low') %}
                         <div class="level-fill {{ clase_nivel }}" style="width: {{ porcentaje }}%">{{ porcentaje }}%</div>
                     {% else %}
-                        <div class="level-fill level-error" style="width: 100%">{{ row[1] }}</div>
+                        <div class="level-fill level-error" style="width: 100%">{{ row.valor }}</div>
                     {% endif %}
+                </div>
+
+                <div class="trend">
+                    <div class="spark-wrap">{{ row.spark_svg | safe }}</div>
+                    <div class="trend-meta {{ row.trend_cls }}">{{ row.trend_text }}</div>
                 </div>
             </div>
             {% endfor %}
@@ -325,24 +735,44 @@ def index():
 </body>
 </html>
 """
-    return render_template_string(html, data_barranco=data_barranco, data_jinamar=data_jinamar, trend_svgs=trend_svgs)
+    return render_template_string(
+        html,
+        data_barranco=data_barranco,
+        data_jinamar=data_jinamar,
+        ultima_captura=ultima_captura_str,
+    )
 
-@app.route('/debug')
+
+@app.route("/debug")
 def debug():
     if os.path.exists(SCREENSHOT_PATH):
-        return send_file(SCREENSHOT_PATH, mimetype='image/png')
+        return send_file(SCREENSHOT_PATH, mimetype="image/png")
     return "Captura no disponible", 404
 
+
+# -------------------
+# MAIN
+# -------------------
 if __name__ == "__main__":
-    conn = sqlite3.connect(DB_NAME)
-    conn.execute('''CREATE TABLE IF NOT EXISTS lecturas 
-                    (descripcion TEXT, valor TEXT, timestamp TEXT, nivel_max REAL)''')
-    conn.commit()
-    conn.close()
-    
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=ejecutar_scrapping, trigger=CronTrigger(minute='0,15,30,45'), id='fuel_levels_capture', replace_existing=True)
+    init_db()
+
+    scheduler = BackgroundScheduler(timezone=TZ)
+
+    # Alineado a xx:00, xx:15, xx:30, xx:45
+    scheduler.add_job(
+        func=ejecutar_scrapping,
+        trigger="cron",
+        minute="0,15,30,45",
+        second=0,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+        replace_existing=True,
+        id="captura_niveles_15m",
+    )
     scheduler.start()
-    print("Servidor iniciado. Capturas programadas cada 15 min (:00/:15/:30/:45).")
-    ejecutar_scrapping()  # Captura inicial
-    app.run(host='0.0.0.0', port=5000)
+
+    # Primera captura al arrancar (luego ya sigue el cron)
+    ejecutar_scrapping()
+
+    app.run(host="0.0.0.0", port=5000)
