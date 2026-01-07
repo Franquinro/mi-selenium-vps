@@ -2,8 +2,9 @@ import os
 import time
 import base64
 import sqlite3
+import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, render_template_string, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -69,7 +70,7 @@ def build_driver():
     return driver
 
 def ejecutar_scrapping():
-    print(f"[{datetime.now()}] Iniciando captura...")
+    print(f"[{datetime.now()}] Iniciando captura programada...")
     driver = build_driver()
     
     try:
@@ -78,49 +79,53 @@ def ejecutar_scrapping():
         time.sleep(5)
         
         target_url = PI_BASE_URL + DISPLAY_HASH
-        print(f"Navegando a: {target_url}")
         driver.get(target_url)
         
         primer_tag = DATOS_A_BUSCAR[0][0]
-        print(f"Esperando tag: {primer_tag}...")
+        WebDriverWait(driver, 60).until(
+            EC.presence_of_element_located((By.XPATH, f"//div[contains(@title, '{primer_tag}')]"))
+        )
+
+        time.sleep(8) # Espera adicional para que los valores numéricos carguen tras la estructura
         
-        try:
-            WebDriverWait(driver, 60).until(
-                EC.presence_of_element_located((By.XPATH, f"//div[contains(@title, '{primer_tag}')]"))
-            )
-        except Exception as te:
-            print(f"Timeout esperando elementos. URL actual: {driver.current_url}")
-            driver.save_screenshot(SCREENSHOT_PATH)
-            raise te
-
-        time.sleep(5)
-        driver.save_screenshot(SCREENSHOT_PATH)
-
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM lecturas")
-        fecha_actual = datetime.now().strftime("%H:%M:%S")
+        
+        # IMPORTANTE: Ya NO borramos todo. Solo borramos datos más viejos de 48 horas para mantener el disco limpio
+        limite_borrado = (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("DELETE FROM lecturas WHERE fecha < ?", (limite_borrado,))
+        
+        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
             try:
                 elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
-                valor = (elemento.text or "").strip()
-                if not valor:
-                    valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
-                cursor.execute("INSERT INTO lecturas VALUES (?, ?, ?, ?)", 
-                             (descripcion, valor or "---", fecha_actual, nivel_max))
+                valor_raw = (elemento.text or "").strip()
+                if not valor_raw:
+                    valor_raw = driver.execute_script("return arguments[0].innerText;", elemento).strip()
+                
+                # Intentamos limpiar el valor para que sea solo el número
+                valor_limpio = valor_raw.replace('m', '').replace('³', '').replace(',', '.').strip()
+                try:
+                    # Guardamos el valor numérico si es posible, si no el string
+                    float(valor_limpio)
+                    valor_final = valor_limpio
+                except:
+                    valor_final = valor_raw
+
+                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha, nivel_max) VALUES (?, ?, ?, ?)", 
+                             (descripcion, valor_final or "---", fecha_actual, nivel_max))
             except:
-                cursor.execute("INSERT INTO lecturas VALUES (?, ?, ?, ?)", 
+                cursor.execute("INSERT INTO lecturas (descripcion, valor, fecha, nivel_max) VALUES (?, ?, ?, ?)", 
                              (descripcion, "Error", fecha_actual, nivel_max))
         
         conn.commit()
         conn.close()
-        print("Captura finalizada con éxito.")
+        print(f"[{datetime.now()}] Captura finalizada con éxito.")
 
     except Exception as e:
         print(f"Error detectado: {e}")
-        try: driver.save_screenshot(SCREENSHOT_PATH)
-        except: pass
+        driver.save_screenshot(SCREENSHOT_PATH)
     finally:
         driver.quit()
 
@@ -128,12 +133,34 @@ def ejecutar_scrapping():
 def index():
     try:
         conn = sqlite3.connect(DB_NAME)
-        df = pd.read_sql_query("SELECT * FROM lecturas", conn)
+        # Obtenemos datos de las últimas 24 horas para las tendencias
+        hace_24h = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        df_completo = pd.read_sql_query("SELECT * FROM lecturas WHERE fecha > ? ORDER BY fecha ASC", conn, params=(hace_24h,))
         conn.close()
+
+        # Preparar estructura de datos para el frontend
+        dashboard_data = []
+        for _, desc, _ in DATOS_A_BUSCAR:
+            df_tanque = df_completo[df_completo['descripcion'] == desc]
+            if not df_tanque.empty:
+                ultimo = df_tanque.iloc[-1].to_dict()
+                # Preparar datos para el gráfico (historial)
+                historial_valores = df_tanque['valor'].tolist()
+                historial_fechas = [d.split(" ")[1][:5] for d in df_tanque['fecha'].tolist()] # Solo HH:MM
+                
+                dashboard_data.append({
+                    'descripcion': desc,
+                    'valor_actual': ultimo['valor'],
+                    'fecha': ultimo['fecha'],
+                    'nivel_max': ultimo['nivel_max'],
+                    'historial_v': historial_valores,
+                    'historial_f': historial_fechas
+                })
         
-        data_barranco = df.iloc[:8].values.tolist()
-        data_jinamar = df.iloc[8:].values.tolist()
-    except:
+        data_barranco = dashboard_data[:8]
+        data_jinamar = dashboard_data[8:]
+    except Exception as e:
+        print(f"Error en index: {e}")
         data_barranco = []
         data_jinamar = []
     
@@ -143,332 +170,133 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Monitor Niveles Combustible - PI Vision</title>
+        <title>Niveles Combustible - Tendencia 24h</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            
+            * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
-                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
-                color: #e0e0e0;
-                padding: 12px;
-                min-height: 100vh;
-                overflow-y: auto;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
+                font-family: 'Inter', sans-serif;
+                background: #0f172a;
+                color: #f1f5f9;
+                padding: 20px;
+                display: flex; flex-direction: column; align-items: center;
             }
-            
-            .dashboard-header {
-                text-align: center;
-                margin-bottom: 15px;
-                padding: 12px;
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 10px;
-                backdrop-filter: blur(10px);
-                box-shadow: 0 3px 15px rgba(0, 0, 0, 0.3);
-                width: 80%;
-            }
-            
-            .dashboard-header h1 {
-                font-size: 1.6em;
-                font-weight: 700;
-                color: #ffffff;
-                margin-bottom: 4px;
-                text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-            }
-            
-            .dashboard-header .subtitle {
-                font-size: 0.8em;
-                color: #a0aec0;
-                letter-spacing: 0.4px;
-            }
-            
-            .plant-container {
-                background: rgba(255, 255, 255, 0.08);
-                border-radius: 12px;
-                padding: 15px;
-                margin-bottom: 15px;
-                box-shadow: 0 6px 25px rgba(0, 0, 0, 0.3);
-                backdrop-filter: blur(10px);
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                width: 80%;
-            }
-            
-            .plant-title {
-                font-size: 1.2em;
-                font-weight: 700;
-                color: #ffffff;
-                margin-bottom: 12px;
-                padding-bottom: 8px;
-                border-bottom: 3px solid;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            
-            .plant-container.barranco .plant-title {
-                border-color: #4299e1;
-            }
-            
-            .plant-container.jinamar .plant-title {
-                border-color: #48bb78;
-            }
-            
-            .plant-icon {
-                width: 28px;
-                height: 28px;
-                border-radius: 6px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1.1em;
-                font-weight: bold;
-            }
-            
-            .plant-container.barranco .plant-icon {
-                background: linear-gradient(135deg, #4299e1, #3182ce);
-                color: white;
-            }
-            
-            .plant-container.jinamar .plant-icon {
-                background: linear-gradient(135deg, #48bb78, #38a169);
-                color: white;
-            }
-            
-            .widgets-grid {
-                display: grid;
-                grid-template-columns: repeat(4, 1fr);
-                gap: 12px;
-            }
+            .dashboard-header { width: 90%; max-width: 1400px; margin-bottom: 25px; border-left: 4px solid #3b82f6; padding-left: 15px; }
+            .plant-container { width: 90%; max-width: 1400px; margin-bottom: 40px; }
+            .plant-title { font-size: 1.4em; font-weight: 700; margin-bottom: 20px; color: #94a3b8; display: flex; align-items: center; gap: 10px; }
+            .widgets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
             
             .widget {
-                background: rgba(255, 255, 255, 0.06);
-                border-radius: 10px;
-                padding: 14px;
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                transition: all 0.3s ease;
-                box-shadow: 0 3px 12px rgba(0, 0, 0, 0.2);
+                background: #1e293b; border-radius: 12px; padding: 18px;
+                border: 1px solid #334155; transition: transform 0.2s;
             }
+            .widget-header { display: flex; justify-content: space-between; margin-bottom: 12px; }
+            .tank-name { font-weight: 700; font-size: 0.9em; color: #3b82f6; }
+            .timestamp { font-size: 0.7em; color: #64748b; }
             
-            .widget:hover {
-                transform: translateY(-3px);
-                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-                border-color: rgba(255, 255, 255, 0.15);
-            }
+            .main-val-container { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; }
+            .value-number { font-size: 2.2em; font-weight: 800; color: #fff; }
+            .value-unit { color: #64748b; font-weight: 600; }
             
-            .widget-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: flex-start;
-                margin-bottom: 10px;
-            }
+            .level-bar-bg { height: 8px; background: #0f172a; border-radius: 4px; margin: 10px 0; overflow: hidden; }
+            .level-bar-fill { height: 100%; transition: width 1s; }
             
-            .tank-name {
-                font-weight: 700;
-                font-size: 0.85em;
-                color: #ffffff;
-                line-height: 1.2;
-                flex: 1;
-            }
+            .chart-container { height: 80px; margin-top: 15px; }
             
-            .timestamp {
-                font-size: 0.65em;
-                color: #718096;
-                white-space: nowrap;
-                margin-left: 8px;
-                padding: 3px 7px;
-                background: rgba(0, 0, 0, 0.2);
-                border-radius: 5px;
-            }
-            
-            .value-display {
-                display: flex;
-                align-items: baseline;
-                gap: 6px;
-                margin-bottom: 6px;
-            }
-            
-            .value-number {
-                font-size: 2em;
-                font-weight: 700;
-                color: #ffffff;
-                line-height: 1;
-            }
-            
-            .value-unit {
-                font-size: 0.9em;
-                color: #a0aec0;
-                font-weight: 600;
-            }
-            
-            .max-indicator {
-                font-size: 0.7em;
-                color: #4299e1;
-                font-weight: 600;
-                margin-bottom: 8px;
-            }
-            
-            .level-indicator {
-                position: relative;
-                height: 22px;
-                background: rgba(0, 0, 0, 0.3);
-                border-radius: 11px;
-                overflow: hidden;
-                box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
-            }
-            
-            .level-fill {
-                height: 100%;
-                border-radius: 11px;
-                transition: width 0.8s ease, background 0.3s ease;
-                display: flex;
-                align-items: center;
-                justify-content: flex-end;
-                padding-right: 10px;
-                font-size: 0.68em;
-                font-weight: 700;
-                color: white;
-                text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-            }
-            
-            .level-low {
-                background: linear-gradient(90deg, #f56565, #e53e3e);
-            }
-            
-            .level-medium {
-                background: linear-gradient(90deg, #ed8936, #dd6b20);
-            }
-            
-            .level-high {
-                background: linear-gradient(90deg, #48bb78, #38a169);
-            }
-            
-            .level-error {
-                background: linear-gradient(90deg, #718096, #4a5568);
-            }
-            
-            @media (max-width: 1600px) {
-                .widgets-grid {
-                    grid-template-columns: repeat(3, 1fr);
-                }
-            }
-            
-            @media (max-width: 1200px) {
-                .widgets-grid {
-                    grid-template-columns: repeat(2, 1fr);
-                }
-                
-                .dashboard-header,
-                .plant-container {
-                    width: 90%;
-                }
-            }
-            
-            @media (max-width: 768px) {
-                .widgets-grid {
-                    grid-template-columns: 1fr;
-                }
-                
-                .dashboard-header,
-                .plant-container {
-                    width: 95%;
-                }
-                
-                .dashboard-header h1 {
-                    font-size: 1.3em;
-                }
-                
-                .value-number {
-                    font-size: 1.8em;
-                }
-            }
+            .bg-low { background: #ef4444; }
+            .bg-med { background: #f59e0b; }
+            .bg-high { background: #10b981; }
         </style>
     </head>
     <body>
         <div class="dashboard-header">
-            <h1>🏭 Monitor de Niveles de Combustible</h1>
-            <div class="subtitle">Sistema PI Vision - Actualización Automática</div>
+            <h1>Monitor de Niveles</h1>
+            <p style="color: #64748b">Actualización: cada 15 min | Tendencia: últimas 24h</p>
         </div>
-        
-        <div class="plant-container barranco">
-            <div class="plant-title">
-                <div class="plant-icon">B</div>
-                PLANTA BARRANCO
-            </div>
+
+        <div class="plant-container">
+            <div class="plant-title">📍 PLANTA BARRANCO</div>
             <div class="widgets-grid">
-                {% for row in data_barranco %}
-                <div class="widget">
-                    <div class="widget-header">
-                        <div class="tank-name">{{ row[0] }}</div>
-                        <div class="timestamp">{{ row[2] }}</div>
-                    </div>
-                    <div class="value-display">
-                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').strip() %}
-                        <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row[1] }}</div>
-                        <div class="value-unit">{% if valor_limpio not in ['Error', '---'] %}m{% endif %}</div>
-                    </div>
-                    <div class="max-indicator">Máximo: {{ row[3] }} m</div>
-                    <div class="level-indicator">
-                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').replace(',', '.').strip() %}
-                        {% if valor_limpio.replace('.', '', 1).isdigit() %}
-                            {% set nivel_actual = valor_limpio|float %}
-                            {% set nivel_max = row[3]|float %}
-                            {% set porcentaje = (nivel_actual / nivel_max * 100)|round(1) %}
-                            {% set clase_nivel = 'level-high' if porcentaje >= 60 else ('level-medium' if porcentaje >= 30 else 'level-low') %}
-                            <div class="level-fill {{ clase_nivel }}" style="width: {{ porcentaje }}%">{{ porcentaje }}%</div>
-                        {% else %}
-                            <div class="level-fill level-error" style="width: 100%">{{ row[1] }}</div>
-                        {% endif %}
-                    </div>
-                </div>
+                {% for item in data_barranco %}
+                {{ render_widget(item) }}
                 {% endfor %}
             </div>
         </div>
-        
-        <div class="plant-container jinamar">
-            <div class="plant-title">
-                <div class="plant-icon">J</div>
-                PLANTA JINAMAR
-            </div>
+
+        <div class="plant-container">
+            <div class="plant-title">📍 PLANTA JINAMAR</div>
             <div class="widgets-grid">
-                {% for row in data_jinamar %}
-                <div class="widget">
-                    <div class="widget-header">
-                        <div class="tank-name">{{ row[0] }}</div>
-                        <div class="timestamp">{{ row[2] }}</div>
-                    </div>
-                    <div class="value-display">
-                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').strip() %}
-                        <div class="value-number">{{ valor_limpio if valor_limpio not in ['Error', '---'] else row[1] }}</div>
-                        <div class="value-unit">{% if valor_limpio not in ['Error', '---'] %}m{% endif %}</div>
-                    </div>
-                    <div class="max-indicator">Máximo: {{ row[3] }} m</div>
-                    <div class="level-indicator">
-                        {% set valor_limpio = row[1].replace('m', '').replace('³', '').replace(',', '.').strip() %}
-                        {% if valor_limpio.replace('.', '', 1).isdigit() %}
-                            {% set nivel_actual = valor_limpio|float %}
-                            {% set nivel_max = row[3]|float %}
-                            {% set porcentaje = (nivel_actual / nivel_max * 100)|round(1) %}
-                            {% set clase_nivel = 'level-high' if porcentaje >= 60 else ('level-medium' if porcentaje >= 30 else 'level-low') %}
-                            <div class="level-fill {{ clase_nivel }}" style="width: {{ porcentaje }}%">{{ porcentaje }}%</div>
-                        {% else %}
-                            <div class="level-fill level-error" style="width: 100%">{{ row[1] }}</div>
-                        {% endif %}
-                    </div>
-                </div>
+                {% for item in data_jinamar %}
+                {{ render_widget(item) }}
                 {% endfor %}
             </div>
         </div>
+
+        {% macro render_widget(item) %}
+        <div class="widget">
+            <div class="widget-header">
+                <span class="tank-name">{{ item.descripcion }}</span>
+                <span class="timestamp">{{ item.fecha.split(' ')[1] }}</span>
+            </div>
+            <div class="main-val-container">
+                <span class="value-number">{{ item.valor_actual }}</span>
+                <span class="value-unit">m</span>
+            </div>
+            
+            {% set pct = (item.valor_actual|float / item.nivel_max|float * 100)|round(0) if item.valor_actual|float > 0 else 0 %}
+            <div class="level-bar-bg">
+                <div class="level-bar-fill {{ 'bg-high' if pct > 60 else ('bg-med' if pct > 25 else 'bg-low') }}" style="width: {{ pct }}%"></div>
+            </div>
+            <div style="font-size: 0.7em; color: #64748b">Capacidad: {{ pct }}% de {{ item.nivel_max }}m</div>
+
+            <div class="chart-container">
+                <canvas id="chart-{{ item.descripcion|replace(' ', '-') }}"></canvas>
+            </div>
+        </div>
+        {% endmacro %}
+
+        <script>
+            const dataFull = {{ dashboard_json|safe }};
+            
+            dataFull.forEach(item => {
+                const ctx = document.getElementById('chart-' + item.descripcion.replace(/ /g, '-')).getContext('2d');
+                new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: item.historial_f,
+                        datasets: [{
+                            data: item.historial_v,
+                            borderColor: '#3b82f6',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            fill: true,
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            tension: 0.4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { display: false },
+                            y: { 
+                                display: true,
+                                grid: { display: false },
+                                ticks: { color: '#475569', font: { size: 9 }, maxTicksLimit: 3 }
+                            }
+                        }
+                    }
+                });
+            });
+        </script>
     </body>
     </html>
     """
-    return render_template_string(html, data_barranco=data_barranco, data_jinamar=data_jinamar)
+    # Pasamos los datos serializados a JSON para los gráficos de Chart.js
+    dashboard_json = json.dumps(data_barranco + data_jinamar)
+    return render_template_string(html, data_barranco=data_barranco, data_jinamar=data_jinamar, dashboard_json=dashboard_json)
 
 @app.route('/debug')
 def debug():
@@ -478,11 +306,16 @@ def debug():
 
 if __name__ == "__main__":
     conn = sqlite3.connect(DB_NAME)
+    # Aseguramos que la tabla tiene las columnas necesarias
     conn.execute('CREATE TABLE IF NOT EXISTS lecturas (descripcion TEXT, valor TEXT, fecha TEXT, nivel_max INTEGER)')
     conn.close()
 
     scheduler = BackgroundScheduler()
-    scheduler.add_job(func=ejecutar_scrapping, trigger="interval", hours=1)
+    # CAMBIO: Ejecución cada 15 minutos exactos (00, 15, 30, 45)
+    scheduler.add_job(func=ejecutar_scrapping, trigger='cron', minute='0,15,30,45')
     scheduler.start()
+    
+    # Ejecución inicial para tener datos al arrancar
     ejecutar_scrapping()
+    
     app.run(host='0.0.0.0', port=5000)
