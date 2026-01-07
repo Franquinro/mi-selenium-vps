@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from flask import Flask, render_template_string, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -27,7 +28,7 @@ TZ = ZoneInfo("Atlantic/Canary")
 
 USERNAME = r"enelint\es43282213p"
 PASSWORD1 = os.getenv("SCRAP_PASS1", "")
-PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # se mantiene por si lo necesitas después
+PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # reservado
 
 # Persistencia (Coolify Volume montado en /app/data)
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
@@ -60,7 +61,6 @@ DATOS_A_BUSCAR = (
 ORDER_TAGS = [t[0] for t in DATOS_A_BUSCAR]
 BARRANCO_TAGS = set(ORDER_TAGS[:8])
 JINAMAR_TAGS = set(ORDER_TAGS[8:])
-
 
 # -------------------
 # DB
@@ -191,7 +191,7 @@ def ejecutar_scrapping():
 
 
 # -------------------
-# TENDENCIA (24h)
+# PARSEO + TENDENCIA (24h)
 # -------------------
 _float_re = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 
@@ -211,10 +211,9 @@ def parse_float(valor_texto: str):
 def make_sparkline_svg(values, width=120, height=28, padding=2):
     if not values or len(values) < 2:
         return (
-            f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
-            f'xmlns="http://www.w3.org/2000/svg">'
-            f'<path d="M {padding} {height/2:.2f} L {width-padding} {height/2:.2f}" '
-            f'class="sparkline-path sparkline-flat"/></svg>'
+            f'<svg class="sparkline" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+            f'<path d="M {padding} {height/2:.2f} L {width-padding} {height/2:.2f}" class="sparkline-path sparkline-flat"/>'
+            f"</svg>"
         )
 
     vmin = min(values)
@@ -222,10 +221,9 @@ def make_sparkline_svg(values, width=120, height=28, padding=2):
     if abs(vmax - vmin) < 1e-9:
         y = height / 2
         return (
-            f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
-            f'xmlns="http://www.w3.org/2000/svg">'
-            f'<path d="M {padding} {y:.2f} L {width-padding} {y:.2f}" '
-            f'class="sparkline-path sparkline-flat"/></svg>'
+            f'<svg class="sparkline" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+            f'<path d="M {padding} {y:.2f} L {width-padding} {y:.2f}" class="sparkline-path sparkline-flat"/>'
+            f"</svg>"
         )
 
     usable_w = width - 2 * padding
@@ -244,13 +242,16 @@ def make_sparkline_svg(values, width=120, height=28, padding=2):
     )
 
     return (
-        f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
-        f'xmlns="http://www.w3.org/2000/svg">'
-        f'<path d="{d}" class="sparkline-path"/></svg>'
+        f'<svg class="sparkline" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
+        f'<path d="{d}" class="sparkline-path"/>'
+        f"</svg>"
     )
 
 
 def build_trends(df_24h: pd.DataFrame):
+    """
+    Devuelve dict: tag -> {svg, text, cls}
+    """
     trends = {}
     if df_24h.empty:
         return trends
@@ -275,12 +276,135 @@ def build_trends(df_24h: pd.DataFrame):
             cls = "trend-down"
 
         trends[tag] = {
-            "svg": make_sparkline_svg(vals[-96:]),  # 24h a 15min
+            "svg": make_sparkline_svg(vals[-96:]),  # 24h a 15 min
             "text": f"24h: {delta:+.2f} m",
             "cls": cls,
         }
 
     return trends
+
+
+# -------------------
+# BREVO API (EMAIL)
+# -------------------
+def enviar_email_brevo_api(subject: str, text_content: str):
+    api_key = os.getenv("BREVO_API_KEY", "").strip()
+    mail_from = os.getenv("MAIL_FROM", "").strip()
+    mail_from_name = os.getenv("MAIL_FROM_NAME", "").strip()
+    mail_to = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
+
+    if not api_key:
+        print("Brevo(API): falta BREVO_API_KEY")
+        return
+    if not mail_from:
+        print("Brevo(API): falta MAIL_FROM")
+        return
+    if not mail_to:
+        print("Brevo(API): falta MAIL_TO")
+        return
+
+    payload = {
+        "sender": {"email": mail_from, **({"name": mail_from_name} if mail_from_name else {})},
+        "to": [{"email": m} for m in mail_to],
+        "subject": subject,
+        "textContent": text_content,
+    }
+
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "api-key": api_key,
+    }
+
+    url = "https://api.brevo.com/v3/smtp/email"
+    r = requests.post(url, json=payload, headers=headers, timeout=30)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Brevo(API) error {r.status_code}: {r.text}")
+
+    print("Brevo(API): email enviado OK")
+
+
+def construir_resumen_texto():
+    """
+    Construye un resumen con:
+      - Última lectura por tanque
+      - Delta 24h (si hay datos numéricos)
+    """
+    conn = _db_connect()
+
+    df_latest = pd.read_sql_query(
+        """
+        SELECT l.tag, l.descripcion, l.valor, l.ts, l.nivel_max
+        FROM lecturas l
+        JOIN (
+            SELECT tag, MAX(ts) AS max_ts
+            FROM lecturas
+            GROUP BY tag
+        ) m ON l.tag = m.tag AND l.ts = m.max_ts
+        """,
+        conn,
+    )
+
+    ts_min = (datetime.now(TZ) - timedelta(hours=24)).isoformat(timespec="seconds")
+    df_24h = pd.read_sql_query(
+        "SELECT tag, ts, valor FROM lecturas WHERE ts >= ?",
+        conn,
+        params=(ts_min,),
+    )
+
+    conn.close()
+
+    # Delta 24h por tag
+    deltas = {}
+    if not df_24h.empty:
+        df = df_24h.copy()
+        df["dt"] = df["ts"].apply(lambda s: datetime.fromisoformat(s))
+        df["num"] = df["valor"].apply(parse_float)
+        df = df.dropna(subset=["num"]).sort_values(["tag", "dt"])
+        for tag, g in df.groupby("tag"):
+            vals = g["num"].tolist()
+            if len(vals) >= 2:
+                deltas[tag] = vals[-1] - vals[0]
+
+    now_str = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
+    subject = f"Niveles combustible - {now_str}"
+
+    dashboard_url = os.getenv("DASHBOARD_URL", "").strip()
+
+    lines = []
+    lines.append(f"Resumen automático de niveles ({now_str})")
+    lines.append("")
+    if dashboard_url:
+        lines.append(f"Panel: {dashboard_url}")
+        lines.append("")
+
+    latest_map = {r["tag"]: r for _, r in df_latest.iterrows()} if not df_latest.empty else {}
+
+    for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
+        r = latest_map.get(tag)
+        if r is None:
+            lines.append(f"- {descripcion}: --- (Δ24h —)")
+            continue
+
+        val = str(r["valor"])
+        ts = str(r["ts"])
+        d = deltas.get(tag)
+        if d is None:
+            delta_txt = "Δ24h —"
+        else:
+            delta_txt = f"Δ24h {d:+.2f} m"
+
+        lines.append(f"- {descripcion}: {val} (max {nivel_max} m) | {delta_txt} | {ts}")
+
+    return subject, "\n".join(lines)
+
+
+def enviar_resumen_8h():
+    try:
+        subject, body = construir_resumen_texto()
+        enviar_email_brevo_api(subject, body)
+    except Exception as e:
+        print(f"Email: error enviando resumen: {e}")
 
 
 # -------------------
@@ -386,7 +510,6 @@ def index():
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
@@ -398,7 +521,6 @@ def index():
             flex-direction: column;
             align-items: center;
         }
-
         .dashboard-header {
             text-align: center;
             margin-bottom: 15px;
@@ -409,7 +531,6 @@ def index():
             box-shadow: 0 3px 15px rgba(0, 0, 0, 0.3);
             width: 80%;
         }
-
         .dashboard-header h1 {
             font-size: 1.6em;
             font-weight: 700;
@@ -417,13 +538,11 @@ def index():
             margin-bottom: 4px;
             text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
         }
-
         .dashboard-header .subtitle {
             font-size: 0.8em;
             color: #a0aec0;
             letter-spacing: 0.4px;
         }
-
         .plant-container {
             background: rgba(255, 255, 255, 0.08);
             border-radius: 12px;
@@ -434,7 +553,6 @@ def index():
             border: 1px solid rgba(255, 255, 255, 0.1);
             width: 80%;
         }
-
         .plant-title {
             font-size: 1.2em;
             font-weight: 700;
@@ -446,37 +564,24 @@ def index():
             align-items: center;
             gap: 10px;
         }
-
         .plant-container.barranco .plant-title { border-color: #4299e1; }
         .plant-container.jinamar .plant-title { border-color: #48bb78; }
-
         .plant-icon {
-            width: 28px;
-            height: 28px;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.1em;
-            font-weight: bold;
+            width: 28px; height: 28px; border-radius: 6px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.1em; font-weight: bold;
         }
-
         .plant-container.barranco .plant-icon {
-            background: linear-gradient(135deg, #4299e1, #3182ce);
-            color: white;
+            background: linear-gradient(135deg, #4299e1, #3182ce); color: white;
         }
-
         .plant-container.jinamar .plant-icon {
-            background: linear-gradient(135deg, #48bb78, #38a169);
-            color: white;
+            background: linear-gradient(135deg, #48bb78, #38a169); color: white;
         }
-
         .widgets-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 12px;
         }
-
         .widget {
             background: rgba(255, 255, 255, 0.06);
             border-radius: 10px;
@@ -485,88 +590,44 @@ def index():
             transition: all 0.3s ease;
             box-shadow: 0 3px 12px rgba(0, 0, 0, 0.2);
         }
-
         .widget:hover {
             transform: translateY(-3px);
             box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
             border-color: rgba(255, 255, 255, 0.15);
         }
-
         .widget-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
+            display: flex; justify-content: space-between; align-items: flex-start;
             margin-bottom: 10px;
         }
-
         .tank-name {
-            font-weight: 700;
-            font-size: 0.85em;
-            color: #ffffff;
-            line-height: 1.2;
-            flex: 1;
+            font-weight: 700; font-size: 0.85em; color: #ffffff;
+            line-height: 1.2; flex: 1;
         }
-
         .timestamp {
-            font-size: 0.65em;
-            color: #718096;
-            white-space: nowrap;
-            margin-left: 8px;
-            padding: 3px 7px;
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 5px;
+            font-size: 0.65em; color: #718096; white-space: nowrap;
+            margin-left: 8px; padding: 3px 7px;
+            background: rgba(0, 0, 0, 0.2); border-radius: 5px;
         }
-
         .value-display {
-            display: flex;
-            align-items: baseline;
-            gap: 6px;
+            display: flex; align-items: baseline; gap: 6px;
             margin-bottom: 6px;
         }
-
-        .value-number {
-            font-size: 2em;
-            font-weight: 700;
-            color: #ffffff;
-            line-height: 1;
-        }
-
-        .value-unit {
-            font-size: 0.9em;
-            color: #a0aec0;
-            font-weight: 600;
-        }
-
-        .max-indicator {
-            font-size: 0.7em;
-            color: #4299e1;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }
-
+        .value-number { font-size: 2em; font-weight: 700; color: #ffffff; line-height: 1; }
+        .value-unit { font-size: 0.9em; color: #a0aec0; font-weight: 600; }
+        .max-indicator { font-size: 0.7em; color: #4299e1; font-weight: 600; margin-bottom: 8px; }
         .level-indicator {
-            position: relative;
-            height: 22px;
+            position: relative; height: 22px;
             background: rgba(0, 0, 0, 0.3);
-            border-radius: 11px;
-            overflow: hidden;
+            border-radius: 11px; overflow: hidden;
             box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
         }
-
         .level-fill {
-            height: 100%;
-            border-radius: 11px;
+            height: 100%; border-radius: 11px;
             transition: width 0.8s ease, background 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: flex-end;
-            padding-right: 10px;
-            font-size: 0.68em;
-            font-weight: 700;
-            color: white;
+            display: flex; align-items: center; justify-content: flex-end;
+            padding-right: 10px; font-size: 0.68em; font-weight: 700; color: white;
             text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
         }
-
         .level-low { background: linear-gradient(90deg, #f56565, #e53e3e); }
         .level-medium { background: linear-gradient(90deg, #ed8936, #dd6b20); }
         .level-high { background: linear-gradient(90deg, #48bb78, #38a169); }
@@ -574,22 +635,16 @@ def index():
 
         .trend {
             margin-top: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
+            display: flex; align-items: center; justify-content: space-between;
             gap: 10px;
         }
-
         .sparkline { width: 120px; height: 28px; display: block; }
         .sparkline-path {
-            fill: none;
-            stroke-width: 2.2;
+            fill: none; stroke-width: 2.2;
             stroke: rgba(255, 255, 255, 0.75);
-            stroke-linecap: round;
-            stroke-linejoin: round;
+            stroke-linecap: round; stroke-linejoin: round;
         }
         .sparkline-flat { stroke: rgba(255, 255, 255, 0.35); }
-
         .trend-meta {
             font-size: 0.72em;
             color: #cbd5e0;
@@ -598,20 +653,15 @@ def index():
             border-radius: 6px;
             white-space: nowrap;
         }
-
         .trend-up { color: #9ae6b4; }
         .trend-down { color: #feb2b2; }
         .trend-flat { color: #cbd5e0; }
 
-        @media (max-width: 1600px) {
-            .widgets-grid { grid-template-columns: repeat(3, 1fr); }
-        }
-
+        @media (max-width: 1600px) { .widgets-grid { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 1200px) {
             .widgets-grid { grid-template-columns: repeat(2, 1fr); }
             .dashboard-header, .plant-container { width: 90%; }
         }
-
         @media (max-width: 768px) {
             .widgets-grid { grid-template-columns: 1fr; }
             .dashboard-header, .plant-container { width: 95%; }
@@ -629,8 +679,7 @@ def index():
 
     <div class="plant-container barranco">
         <div class="plant-title">
-            <div class="plant-icon">B</div>
-            PLANTA BARRANCO
+            <div class="plant-icon">B</div> PLANTA BARRANCO
         </div>
         <div class="widgets-grid">
             {% for row in data_barranco %}
@@ -672,8 +721,7 @@ def index():
 
     <div class="plant-container jinamar">
         <div class="plant-title">
-            <div class="plant-icon">J</div>
-            PLANTA JINAMAR
+            <div class="plant-icon">J</div> PLANTA JINAMAR
         </div>
         <div class="widgets-grid">
             {% for row in data_jinamar %}
@@ -738,6 +786,8 @@ if __name__ == "__main__":
     init_db()
 
     scheduler = BackgroundScheduler(timezone=TZ)
+
+    # Captura alineada a xx:00, xx:15, xx:30, xx:45
     scheduler.add_job(
         func=ejecutar_scrapping,
         trigger="cron",
@@ -749,7 +799,24 @@ if __name__ == "__main__":
         replace_existing=True,
         id="captura_niveles_15m",
     )
+
+    # Email cada 8 horas (00:05, 08:05, 16:05) hora Canarias
+    scheduler.add_job(
+        func=enviar_resumen_8h,
+        trigger="cron",
+        hour="4,12,18",
+        minute=5,
+        second=0,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=900,
+        replace_existing=True,
+        id="email_resumen_8h",
+    )
+
     scheduler.start()
 
+    # Primera captura al arrancar
     ejecutar_scrapping()
+
     app.run(host="0.0.0.0", port=5000)
