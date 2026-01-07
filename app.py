@@ -27,10 +27,15 @@ TZ = ZoneInfo("Atlantic/Canary")
 
 USERNAME = r"enelint\es43282213p"
 PASSWORD1 = os.getenv("SCRAP_PASS1", "")
-PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # (se mantiene por si lo necesitas después)
+PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # se mantiene por si lo necesitas después
 
-DB_NAME = "temp_niveles.db"
-SCREENSHOT_PATH = "debug_vps.png"
+# Persistencia (Coolify Volume montado en /app/data)
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DB_NAME = os.path.join(DATA_DIR, "temp_niveles.db")
+SCREENSHOT_PATH = os.path.join(DATA_DIR, "debug_vps.png")
+
 WINDOW_W, WINDOW_H = 1920, 1080
 
 PI_BASE_URL = "https://eworkerbrrc.endesa.es/PIVision/"
@@ -173,7 +178,6 @@ def ejecutar_scrapping():
 
         conn.commit()
         conn.close()
-
         print("Captura finalizada con éxito.")
 
     except Exception as e:
@@ -205,9 +209,6 @@ def parse_float(valor_texto: str):
 
 
 def make_sparkline_svg(values, width=120, height=28, padding=2):
-    """
-    Devuelve un pequeño SVG (sparkline) con los valores normalizados.
-    """
     if not values or len(values) < 2:
         return (
             f'<svg class="sparkline" viewBox="0 0 {width} {height}" '
@@ -234,8 +235,8 @@ def make_sparkline_svg(values, width=120, height=28, padding=2):
     pts = []
     for i, val in enumerate(values):
         x = padding + i * step
-        t = (val - vmin) / (vmax - vmin)  # 0..1
-        y = padding + (1.0 - t) * usable_h  # invertido en SVG
+        t = (val - vmin) / (vmax - vmin)
+        y = padding + (1.0 - t) * usable_h
         pts.append((x, y))
 
     d = f"M {pts[0][0]:.2f} {pts[0][1]:.2f} " + " ".join(
@@ -250,16 +251,10 @@ def make_sparkline_svg(values, width=120, height=28, padding=2):
 
 
 def build_trends(df_24h: pd.DataFrame):
-    """
-    df_24h: columnas [tag, ts, valor]
-    Devuelve dict: tag -> {svg, text, cls}
-    """
     trends = {}
-
     if df_24h.empty:
         return trends
 
-    # Normalizamos timestamp a datetime, y valor a float
     df = df_24h.copy()
     df["dt"] = df["ts"].apply(lambda s: datetime.fromisoformat(s))
     df["num"] = df["valor"].apply(parse_float)
@@ -268,11 +263,7 @@ def build_trends(df_24h: pd.DataFrame):
     for tag, g in df.groupby("tag"):
         vals = g["num"].tolist()
         if len(vals) < 2:
-            trends[tag] = {
-                "svg": make_sparkline_svg([]),
-                "text": "24h: —",
-                "cls": "trend-flat",
-            }
+            trends[tag] = {"svg": make_sparkline_svg([]), "text": "24h: —", "cls": "trend-flat"}
             continue
 
         delta = vals[-1] - vals[0]
@@ -284,7 +275,7 @@ def build_trends(df_24h: pd.DataFrame):
             cls = "trend-down"
 
         trends[tag] = {
-            "svg": make_sparkline_svg(vals[-96:]),  # ideal: 96 puntos (24h a 15 min)
+            "svg": make_sparkline_svg(vals[-96:]),  # 24h a 15min
             "text": f"24h: {delta:+.2f} m",
             "cls": cls,
         }
@@ -297,10 +288,8 @@ def build_trends(df_24h: pd.DataFrame):
 # -------------------
 @app.route("/")
 def index():
-    # Cargamos último valor por tag + datos 24h para tendencia
     conn = _db_connect()
 
-    # Última lectura por tag
     df_latest = pd.read_sql_query(
         """
         SELECT l.tag, l.descripcion, l.valor, l.ts, l.nivel_max
@@ -314,7 +303,6 @@ def index():
         conn,
     )
 
-    # Últimas 24 horas
     ts_min = (datetime.now(TZ) - timedelta(hours=24)).isoformat(timespec="seconds")
     df_24h = pd.read_sql_query(
         "SELECT tag, ts, valor FROM lecturas WHERE ts >= ?",
@@ -326,7 +314,6 @@ def index():
 
     trends = build_trends(df_24h)
 
-    # Mapa rápido de latest por tag
     latest_by_tag = {}
     if not df_latest.empty:
         for _, r in df_latest.iterrows():
@@ -338,7 +325,6 @@ def index():
                 "nivel_max": r["nivel_max"],
             }
 
-    # Construimos lista ordenada y con tendencia
     cards = []
     ultima_captura_dt = None
 
@@ -347,7 +333,6 @@ def index():
         if rec:
             try:
                 dt = datetime.fromisoformat(rec["ts"])
-                # Si viene con offset, perfecto; si no, lo tratamos como TZ local
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=TZ)
             except Exception:
@@ -357,11 +342,7 @@ def index():
             if dt and (ultima_captura_dt is None or dt > ultima_captura_dt):
                 ultima_captura_dt = dt
 
-            t = trends.get(tag, None)
-            spark_svg = t["svg"] if t else make_sparkline_svg([])
-            trend_text = t["text"] if t else "24h: —"
-            trend_cls = t["cls"] if t else "trend-flat"
-
+            t = trends.get(tag)
             cards.append(
                 {
                     "tag": tag,
@@ -369,13 +350,12 @@ def index():
                     "valor": rec["valor"],
                     "hora": time_str,
                     "nivel_max": rec["nivel_max"],
-                    "spark_svg": spark_svg,
-                    "trend_text": trend_text,
-                    "trend_cls": trend_cls,
+                    "spark_svg": (t["svg"] if t else make_sparkline_svg([])),
+                    "trend_text": (t["text"] if t else "24h: —"),
+                    "trend_cls": (t["cls"] if t else "trend-flat"),
                 }
             )
         else:
-            # No hay datos aún
             cards.append(
                 {
                     "tag": tag,
@@ -592,7 +572,6 @@ def index():
         .level-high { background: linear-gradient(90deg, #48bb78, #38a169); }
         .level-error { background: linear-gradient(90deg, #718096, #4a5568); }
 
-        /* Tendencia 24h */
         .trend {
             margin-top: 10px;
             display: flex;
@@ -645,6 +624,7 @@ def index():
     <div class="dashboard-header">
         <h1>🏭 Monitor de Niveles de Combustible</h1>
         <div class="subtitle">Sistema PI Vision · Última captura: {{ ultima_captura }}</div>
+        <div class="subtitle" style="margin-top:6px;">Persistencia: {{ data_dir }}</div>
     </div>
 
     <div class="plant-container barranco">
@@ -740,6 +720,7 @@ def index():
         data_barranco=data_barranco,
         data_jinamar=data_jinamar,
         ultima_captura=ultima_captura_str,
+        data_dir=DATA_DIR,
     )
 
 
@@ -757,8 +738,6 @@ if __name__ == "__main__":
     init_db()
 
     scheduler = BackgroundScheduler(timezone=TZ)
-
-    # Alineado a xx:00, xx:15, xx:30, xx:45
     scheduler.add_job(
         func=ejecutar_scrapping,
         trigger="cron",
@@ -772,7 +751,5 @@ if __name__ == "__main__":
     )
     scheduler.start()
 
-    # Primera captura al arrancar (luego ya sigue el cron)
     ejecutar_scrapping()
-
     app.run(host="0.0.0.0", port=5000)
