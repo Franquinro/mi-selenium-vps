@@ -542,14 +542,14 @@ def construir_email_resumen():
             )
 
         return f"""
-        <div style="margin:18px 0 10px 0;">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
-            <h2 style="margin:0;font-size:16px;color:#111827;">{title}</h2>
-            <span style="display:inline-block;padding:4px 10px;border-radius:999px;background:{header_color};color:#ffffff;font-weight:800;font-size:12px;letter-spacing:.3px;">
-              PLANTA
-            </span>
-          </div>
-        </div>
+           <div style="display:flex;align-items:center;justify-content:flex-start;gap:10px;">
+             <h2 style="margin:0;font-size:16px;color:#111827;display:flex;align-items:center;gap:8px;">
+               <span style="display:inline-block;padding:4px 10px;border-radius:999px;background:{header_color};color:#ffffff;font-weight:900;font-size:12px;letter-spacing:.3px;">
+                 CENTRAL
+               </span>
+               <span style="font-weight:800;">{title}</span>
+             </h2>
+           </div>
 
         <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
           <thead>
@@ -1028,3 +1028,4 @@ if __name__ == "__main__":
     enviar_resumen_programado()
 
     app.run(host="0.0.0.0", port=5000)
+
