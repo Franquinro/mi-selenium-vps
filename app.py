@@ -545,9 +545,9 @@ def construir_email_resumen():
            <div style="display:flex;align-items:center;justify-content:flex-start;gap:10px;">
              <h2 style="margin:0;font-size:16px;color:#111827;display:flex;align-items:center;gap:8px;">
                <span style="display:inline-block;padding:4px 10px;border-radius:999px;background:{header_color};color:#ffffff;font-weight:900;font-size:12px;letter-spacing:.3px;">
-                 CENTRAL
+                 CENTRAL <span style="font-weight:800;"> {title}</span>
                </span>
-               <span style="font-weight:800;">{title}</span>
+               
              </h2>
            </div>
 
@@ -1028,4 +1028,5 @@ if __name__ == "__main__":
     enviar_resumen_programado()
 
     app.run(host="0.0.0.0", port=5000)
+
 
