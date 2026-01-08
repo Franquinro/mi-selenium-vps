@@ -28,7 +28,7 @@ TZ = ZoneInfo("Atlantic/Canary")
 
 USERNAME = r"enelint\es43282213p"
 PASSWORD1 = os.getenv("SCRAP_PASS1", "")
-PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # reservado
+PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # reservado por si lo necesitas
 
 # Persistencia (Coolify Volume montado en /app/data)
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
@@ -61,6 +61,7 @@ DATOS_A_BUSCAR = (
 ORDER_TAGS = [t[0] for t in DATOS_A_BUSCAR]
 BARRANCO_TAGS = set(ORDER_TAGS[:8])
 JINAMAR_TAGS = set(ORDER_TAGS[8:])
+
 
 # -------------------
 # DB
@@ -287,7 +288,7 @@ def build_trends(df_24h: pd.DataFrame):
 # -------------------
 # BREVO API (EMAIL)
 # -------------------
-def enviar_email_brevo_api(subject: str, text_content: str):
+def enviar_email_brevo_api(subject: str, text_content: str, html_content: str):
     api_key = os.getenv("BREVO_API_KEY", "").strip()
     mail_from = os.getenv("MAIL_FROM", "").strip()
     mail_from_name = os.getenv("MAIL_FROM_NAME", "").strip()
@@ -308,6 +309,7 @@ def enviar_email_brevo_api(subject: str, text_content: str):
         "to": [{"email": m} for m in mail_to],
         "subject": subject,
         "textContent": text_content,
+        "htmlContent": html_content,
     }
 
     headers = {
@@ -324,11 +326,42 @@ def enviar_email_brevo_api(subject: str, text_content: str):
     print("Brevo(API): email enviado OK")
 
 
-def construir_resumen_texto():
+def _fmt_dt_local(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ)
+    return dt.astimezone(TZ).strftime("%d/%m/%Y %H:%M")
+
+
+def _fmt_level(val_float):
+    if val_float is None:
+        return None
+    return f"{val_float:.2f}"
+
+
+def _level_class_from_pct(pct: float) -> str:
+    if pct >= 60:
+        return "high"
+    if pct >= 30:
+        return "medium"
+    return "low"
+
+
+def _delta_badge(delta):
+    if delta is None:
+        return ("—", "#6b7280", "•")
+    if abs(delta) < 0.01:
+        return (f"{delta:+.2f} m", "#6b7280", "•")
+    if delta > 0:
+        return (f"{delta:+.2f} m", "#16a34a", "▲")
+    return (f"{delta:+.2f} m", "#dc2626", "▼")
+
+
+def obtener_latest_y_deltas_24h():
     """
-    Construye un resumen con:
-      - Última lectura por tanque
-      - Delta 24h (si hay datos numéricos)
+    Devuelve:
+      - latest_map: tag -> {descripcion, valor(str), dt(datetime), nivel_max}
+      - deltas: tag -> delta(float) (numérico) o None
+      - capture_dt: datetime (la última ts entre latest)
     """
     conn = _db_connect()
 
@@ -354,7 +387,7 @@ def construir_resumen_texto():
 
     conn.close()
 
-    # Delta 24h por tag
+    # deltas
     deltas = {}
     if not df_24h.empty:
         df = df_24h.copy()
@@ -363,46 +396,218 @@ def construir_resumen_texto():
         df = df.dropna(subset=["num"]).sort_values(["tag", "dt"])
         for tag, g in df.groupby("tag"):
             vals = g["num"].tolist()
-            if len(vals) >= 2:
-                deltas[tag] = vals[-1] - vals[0]
+            deltas[tag] = (vals[-1] - vals[0]) if len(vals) >= 2 else None
 
-    now_str = datetime.now(TZ).strftime("%d/%m/%Y %H:%M")
-    subject = f"Niveles combustible - {now_str}"
+    latest_map = {}
+    capture_dt = None
+
+    if not df_latest.empty:
+        for _, r in df_latest.iterrows():
+            try:
+                dt = datetime.fromisoformat(str(r["ts"]))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=TZ)
+            except Exception:
+                dt = None
+
+            latest_map[r["tag"]] = {
+                "descripcion": str(r["descripcion"]),
+                "valor": str(r["valor"]),
+                "dt": dt,
+                "nivel_max": float(r["nivel_max"]),
+            }
+
+            if dt and (capture_dt is None or dt > capture_dt):
+                capture_dt = dt
+
+    return latest_map, deltas, capture_dt
+
+
+def construir_email_resumen():
+    """
+    - Pone la hora/fecha UNA vez (todas las lecturas del mismo instante).
+    - Separa Barranco / Jinamar.
+    - Devuelve subject, text, html.
+    """
+    latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
+
+    # Si no hay captura, inventamos “ahora” (pero será raro si ya capturas al arranque)
+    if capture_dt is None:
+        capture_dt = datetime.now(TZ)
+
+    captura_str = _fmt_dt_local(capture_dt)
+    subject = f"Niveles combustible - {captura_str}"
 
     dashboard_url = os.getenv("DASHBOARD_URL", "").strip()
 
-    lines = []
-    lines.append(f"Resumen automático de niveles ({now_str})")
-    lines.append("")
+    def build_rows(tags_set):
+        rows = []
+        for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
+            if tag not in tags_set:
+                continue
+
+            rec = latest_map.get(tag)
+            raw = rec["valor"] if rec else "---"
+            max_m = float(rec["nivel_max"]) if rec else float(nivel_max)
+
+            vnum = parse_float(raw) if rec else None
+            pct = None
+            cls = "error"
+            if vnum is not None and max_m > 0:
+                pct = (vnum / max_m) * 100.0
+                cls = _level_class_from_pct(pct)
+            elif raw in ("---", "Error"):
+                cls = "error"
+
+            delta = deltas.get(tag)
+            delta_txt, delta_color, delta_arrow = _delta_badge(delta)
+
+            rows.append(
+                {
+                    "name": (rec["descripcion"] if rec else descripcion),
+                    "raw": raw,
+                    "vnum": vnum,
+                    "vnum_str": _fmt_level(vnum),
+                    "max_m": max_m,
+                    "pct": pct,
+                    "pct_str": (f"{pct:.1f}%" if pct is not None else "—"),
+                    "cls": cls,
+                    "delta_txt": delta_txt,
+                    "delta_color": delta_color,
+                    "delta_arrow": delta_arrow,
+                }
+            )
+        return rows
+
+    rows_b = build_rows(BARRANCO_TAGS)
+    rows_j = build_rows(JINAMAR_TAGS)
+
+    # -------------------
+    # TEXTO (fallback)
+    # -------------------
+    txt_lines = []
+    txt_lines.append(f"Resumen automático de niveles")
+    txt_lines.append(f"Lectura: {captura_str}")
     if dashboard_url:
-        lines.append(f"Panel: {dashboard_url}")
-        lines.append("")
+        txt_lines.append(f"Panel: {dashboard_url}")
+    txt_lines.append("")
+    txt_lines.append("BARRANCO")
+    for r in rows_b:
+        lvl = f"{r['vnum_str']} m" if r["vnum_str"] is not None else r["raw"]
+        txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']} | Δ24h {r['delta_txt']}")
+    txt_lines.append("")
+    txt_lines.append("JINAMAR")
+    for r in rows_j:
+        lvl = f"{r['vnum_str']} m" if r["vnum_str"] is not None else r["raw"]
+        txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']} | Δ24h {r['delta_txt']}")
 
-    latest_map = {r["tag"]: r for _, r in df_latest.iterrows()} if not df_latest.empty else {}
+    text_content = "\n".join(txt_lines)
 
-    for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
-        r = latest_map.get(tag)
-        if r is None:
-            lines.append(f"- {descripcion}: --- (Δ24h —)")
-            continue
+    # -------------------
+    # HTML (bonito)
+    # -------------------
+    # Colores email-safe (inline)
+    def badge_style(cls):
+        if cls == "high":
+            return "background:#16a34a;color:#ffffff;"
+        if cls == "medium":
+            return "background:#f59e0b;color:#111827;"
+        if cls == "low":
+            return "background:#dc2626;color:#ffffff;"
+        return "background:#6b7280;color:#ffffff;"
 
-        val = str(r["valor"])
-        ts = str(r["ts"])
-        d = deltas.get(tag)
-        if d is None:
-            delta_txt = "Δ24h —"
-        else:
-            delta_txt = f"Δ24h {d:+.2f} m"
+    def render_table(rows, header_color, title):
+        # Tabla con filas alternas
+        trs = []
+        for i, r in enumerate(rows):
+            bg = "#ffffff" if i % 2 == 0 else "#f8fafc"
+            lvl = f"{r['vnum_str']} <span style='color:#6b7280;font-size:12px;'>m</span>" if r["vnum_str"] is not None else f"<span style='color:#6b7280;'>{r['raw']}</span>"
+            pct_badge = (
+                f"<span style='display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;{badge_style(r['cls'])}'>"
+                f"{r['pct_str']}</span>"
+            )
+            delta_badge = (
+                f"<span style='display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;background:{r['delta_color']};color:#ffffff;'>"
+                f"{r['delta_arrow']} {r['delta_txt']}</span>"
+            )
+            trs.append(
+                f"""
+                <tr style="background:{bg};">
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#111827;">{r['name']}</td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:800;color:#111827;white-space:nowrap;">{lvl}</td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;">{pct_badge}</td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;">{delta_badge}</td>
+                </tr>
+                """
+            )
 
-        lines.append(f"- {descripcion}: {val} (max {nivel_max} m) | {delta_txt} | {ts}")
+        return f"""
+        <div style="margin:18px 0 10px 0;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <h2 style="margin:0;font-size:16px;color:#111827;">{title}</h2>
+            <span style="display:inline-block;padding:4px 10px;border-radius:999px;background:{header_color};color:#ffffff;font-weight:800;font-size:12px;letter-spacing:.3px;">
+              PLANTA
+            </span>
+          </div>
+        </div>
 
-    return subject, "\n".join(lines)
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+          <thead>
+            <tr style="background:{header_color};">
+              <th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;letter-spacing:.4px;">TANQUE</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;">NIVEL</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;">% MAX</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;">Δ 24H</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(trs)}
+          </tbody>
+        </table>
+        """
+
+    panel_line = ""
+    if dashboard_url:
+        panel_line = f"""
+        <div style="margin-top:10px;">
+          <a href="{dashboard_url}" style="color:#2563eb;text-decoration:none;font-weight:700;">Abrir panel</a>
+          <span style="color:#94a3b8;font-size:12px;">(si tienes acceso desde fuera)</span>
+        </div>
+        """
+
+    html_content = f"""
+    <div style="background:#f1f5f9;padding:20px 0;">
+      <div style="max-width:760px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;font-family:Inter,Segoe UI,Arial,sans-serif;">
+        <div style="background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);padding:18px 18px;">
+          <div style="color:#ffffff;font-size:18px;font-weight:900;letter-spacing:.2px;">🏭 Monitor de Niveles de Combustible</div>
+          <div style="color:#cbd5e1;font-size:13px;margin-top:6px;">Lectura: <span style="color:#ffffff;font-weight:800;">{captura_str}</span></div>
+          <div style="color:#94a3b8;font-size:12px;margin-top:4px;">Incluye Δ 24h por tanque y % sobre máximo</div>
+        </div>
+
+        <div style="padding:18px 18px 6px 18px;">
+          {panel_line}
+          {render_table(rows_b, "#2563eb", "Barranco")}
+          {render_table(rows_j, "#16a34a", "Jinamar")}
+
+          <div style="margin:14px 0 4px 0;color:#94a3b8;font-size:12px;line-height:1.35;">
+            Nota: El porcentaje se calcula sobre el máximo configurado en la aplicación. El Δ 24h compara el primer valor numérico disponible con el último en las últimas 24h.
+          </div>
+        </div>
+
+        <div style="background:#f8fafc;padding:12px 18px;color:#64748b;font-size:12px;border-top:1px solid #e5e7eb;">
+          Envío automático · {captura_str}
+        </div>
+      </div>
+    </div>
+    """
+
+    return subject, text_content, html_content
 
 
-def enviar_resumen_8h():
+def enviar_resumen_programado():
     try:
-        subject, body = construir_resumen_texto()
-        enviar_email_brevo_api(subject, body)
+        subject, text_content, html_content = construir_email_resumen()
+        enviar_email_brevo_api(subject, text_content, html_content)
     except Exception as e:
         print(f"Email: error enviando resumen: {e}")
 
@@ -456,7 +661,7 @@ def index():
         rec = latest_by_tag.get(tag)
         if rec:
             try:
-                dt = datetime.fromisoformat(rec["ts"])
+                dt = datetime.fromisoformat(str(rec["ts"]))
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=TZ)
             except Exception:
@@ -802,7 +1007,7 @@ if __name__ == "__main__":
 
     # Email a las 04:05, 12:05 y 18:05 (hora Canarias)
     scheduler.add_job(
-        func=enviar_resumen_8h,
+        func=enviar_resumen_programado,
         trigger="cron",
         hour="4,12,18",
         minute=5,
@@ -819,8 +1024,7 @@ if __name__ == "__main__":
     # Primera captura al arrancar
     ejecutar_scrapping()
 
-    # Envío inmediato al arrancar (solo para testear)
-    enviar_resumen_8h()
-    
-    app.run(host="0.0.0.0", port=5000)
+    # Envío inmediato al arrancar (para testear)
+    enviar_resumen_programado()
 
+    app.run(host="0.0.0.0", port=5000)
