@@ -800,7 +800,7 @@ if __name__ == "__main__":
         id="captura_niveles_15m",
     )
 
-    # Email cada 8 horas (00:05, 08:05, 16:05) hora Canarias
+    # Email a las 04:05, 12:05 y 18:05 (hora Canarias)
     scheduler.add_job(
         func=enviar_resumen_8h,
         trigger="cron",
@@ -811,7 +811,7 @@ if __name__ == "__main__":
         coalesce=True,
         misfire_grace_time=900,
         replace_existing=True,
-        id="email_resumen_8h",
+        id="email_resumen_4_12_18",
     )
 
     scheduler.start()
@@ -819,4 +819,8 @@ if __name__ == "__main__":
     # Primera captura al arrancar
     ejecutar_scrapping()
 
+    # Envío inmediato al arrancar (solo para testear)
+    enviar_resumen_8h()
+    
     app.run(host="0.0.0.0", port=5000)
+
