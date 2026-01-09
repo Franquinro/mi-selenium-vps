@@ -504,20 +504,18 @@ def construir_email_resumen():
     # -------------------
     # HTML (Outlook Desktop friendly)
     # -------------------
-    def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 12) -> str:
+    def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 13) -> str:
         """
-        Badge compatible con Outlook.
-        SOLUCIÓN:
-        - Usamos <v:textbox> para forzar el color blanco (evita que Outlook lo ponga negro).
-        - DENTRO del textbox, usamos una <TABLE> con valign="middle".
-          Esto es necesario porque <center> o <div> con line-height fallan dentro de un textbox
-          (provocando el corte o desplazamiento vertical).
+        Badge compatible con Outlook (versión ajustada):
+        - Aumentado font_size a 13px (negrita).
+        - Aumentado height (h) a 30px para dar más espacio.
+        - Añadido padding-top:2px al <td> para empujar visualmente el texto al centro vertical.
         """
         safe = html_lib.escape(text)
 
-        # ancho aproximado
-        w = max(110, min(320, 46 + int(len(text) * 8)))
-        h = 28
+        # ancho aproximado (incrementado factor para fuente 13px)
+        w = max(110, min(320, 50 + int(len(text) * 9)))
+        h = 30  # Altura aumentada
 
         return f"""<!--[if mso]>
 <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
@@ -526,7 +524,7 @@ def construir_email_resumen():
 <v:textbox inset="0,0,0,0">
   <table cellspacing="0" cellpadding="0" border="0" width="{w}" height="{h}">
     <tr>
-      <td align="center" valign="middle" style="color:{fg}; font-family:Arial, sans-serif; font-size:{font_size}px; font-weight:bold; text-align:center;">
+      <td align="center" valign="middle" style="padding-top:2px; color:{fg}; font-family:Arial, sans-serif; font-size:{font_size}px; font-weight:bold; text-align:center;">
         {safe}
       </td>
     </tr>
@@ -534,13 +532,12 @@ def construir_email_resumen():
 </v:textbox>
 </v:roundrect>
 <![endif]--><!--[if !mso]><!-->
-<span style="display:inline-block;background:{bg};color:{fg} !important;padding:6px 14px;border-radius:14px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;font-family:Arial,sans-serif;">
+<span style="display:inline-block;background:{bg};color:{fg} !important;padding:7px 14px;border-radius:15px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;font-family:Arial,sans-serif;">
  {safe}
 </span>
 <!--<![endif]-->"""
 
     def pct_badge_html(pct_text: str, cls: str) -> str:
-        # Texto SIEMPRE blanco
         if cls == "high":
             return badge_html(pct_text, "#16a34a", "#ffffff")
         if cls == "medium":
