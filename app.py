@@ -429,7 +429,7 @@ def construir_email_resumen():
     - Pone la hora/fecha UNA vez (todas las lecturas del mismo instante).
     - Separa Barranco / Jinamar.
     - HTML compatible con Outlook Desktop (tablas + VML para badges redondeados).
-    - Devuelve subject, text, html.
+    - Ahora el badge de sección incluye el nombre: "CENTRAL BARRANCO", "CENTRAL JINAMAR".
     """
     latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
 
@@ -508,16 +508,27 @@ def construir_email_resumen():
     # HTML (Outlook Desktop friendly)
     # -------------------
     def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 12) -> str:
+        """
+        Badge con fallback HTML normal y versión VML para Outlook (Word engine).
+        Arregla el caso de "texto no visible" usando <v:textbox> + <div>.
+        """
         safe = html_lib.escape(text)
-        w = max(52, min(170, 26 + len(text) * 7))  # ancho aproximado
+
+        # ancho aproximado (VML necesita width fijo)
+        # usamos un factor un pelín mayor para textos largos como "CENTRAL BARRANCO"
+        w = max(70, min(260, 30 + int(len(text) * 7.8)))
         h = 22
+
         return f"""<!--[if mso]>
 <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
- arcsize="50%" fillcolor="{bg}" stroke="f" style="height:{h}px;v-text-anchor:middle;width:{w}px;">
+ arcsize="50%" fillcolor="{bg}" strokecolor="{bg}" strokeweight="1px"
+ style="height:{h}px;width:{w}px;v-text-anchor:middle;">
  <w:anchorlock/>
- <center style="color:{fg};font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;line-height:{h}px;">
-  {safe}
- </center>
+ <v:textbox inset="10px,0px,10px,0px">
+  <div style="mso-line-height-rule:exactly;line-height:{h}px;text-align:center;color:{fg};font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;">
+   {safe}
+  </div>
+ </v:textbox>
 </v:roundrect>
 <![endif]--><!--[if !mso]><!-->
 <span style="display:inline-block;background:{bg};color:{fg};padding:3px 10px;border-radius:999px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;">
@@ -534,10 +545,11 @@ def construir_email_resumen():
             return badge_html(pct_text, "#dc2626", "#ffffff")
         return badge_html(pct_text, "#6b7280", "#ffffff")
 
-    def render_table(rows, header_color, title):
+    def render_table(rows, header_color, central_name):
         trs = []
         for i, r in enumerate(rows):
             bg = "#ffffff" if i % 2 == 0 else "#f8fafc"
+
             if r["vnum_str"] is not None:
                 lvl = f"""{html_lib.escape(r['vnum_str'])} <span style="color:#6b7280;font-size:12px;">m</span>"""
             else:
@@ -565,16 +577,15 @@ def construir_email_resumen():
                 """
             )
 
-        # Título sin flex: "CENTRAL <nombre>"
+        # Badge único: "CENTRAL BARRANCO" / "CENTRAL JINAMAR"
+        label = f"CENTRAL {central_name.upper()}"
+
         title_block = f"""
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
                style="width:100%;border-collapse:collapse;margin:18px 0 10px 0;mso-table-lspace:0pt;mso-table-rspace:0pt;">
           <tr>
             <td style="padding:0;">
-              {badge_html("CENTRAL", header_color, "#ffffff")}
-              <span style="font-family:Arial,sans-serif;font-size:16px;color:#111827;font-weight:900;margin-left:8px;vertical-align:middle;">
-                {html_lib.escape(title)}
-              </span>
+              {badge_html(label, header_color, "#ffffff")}
             </td>
           </tr>
         </table>
@@ -612,7 +623,6 @@ def construir_email_resumen():
         </table>
         """
 
-    # Layout completo con tablas + inner table fijo (Outlook respeta widths en tablas)
     html_content = f"""
 <!--[if mso]>
 <style type="text/css">
