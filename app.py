@@ -426,10 +426,11 @@ def obtener_latest_y_deltas_24h():
 
 def construir_email_resumen():
     """
-    - Pone la hora/fecha UNA vez (todas las lecturas del mismo instante).
-    - Separa Barranco / Jinamar.
-    - HTML compatible con Outlook Desktop (tablas + VML para badges redondeados).
-    - Ahora el badge de sección incluye el nombre: "CENTRAL BARRANCO", "CENTRAL JINAMAR".
+    Correcciones:
+    - Badges sin “corte” vertical: aumentamos altura/line-height/padding.
+    - Texto de badges SIEMPRE en blanco (también en Outlook Desktop) con !important.
+    - Nombre de central dentro del badge: "CENTRAL BARRANCO" / "CENTRAL JINAMAR".
+    - HTML compatible con Outlook Desktop (tablas + VML).
     """
     latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
 
@@ -509,38 +510,43 @@ def construir_email_resumen():
     # -------------------
     def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 12) -> str:
         """
-        Badge con fallback HTML normal y versión VML para Outlook (Word engine).
-        Arregla el caso de "texto no visible" usando <v:textbox> + <div>.
+        Badge con:
+        - VML para Outlook Desktop (Word engine) con center + height suficiente.
+        - Span normal para clientes modernos.
+        Ajustes para evitar:
+        - texto negro en Outlook: forzamos color en center.
+        - “corte” vertical: height 28 + line-height 28 + padding en span.
         """
         safe = html_lib.escape(text)
 
         # ancho aproximado (VML necesita width fijo)
-        # usamos un factor un pelín mayor para textos largos como "CENTRAL BARRANCO"
-        w = max(70, min(260, 30 + int(len(text) * 7.8)))
-        h = 22
+        # margen generoso para "CENTRAL BARRANCO"
+        w = max(110, min(320, 46 + int(len(text) * 7.8)))
+        h = 28
 
+        # Nota: center con line-height igual a altura ayuda a que no se recorte
         return f"""<!--[if mso]>
 <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
  arcsize="50%" fillcolor="{bg}" strokecolor="{bg}" strokeweight="1px"
  style="height:{h}px;width:{w}px;v-text-anchor:middle;">
  <w:anchorlock/>
- <v:textbox inset="10px,0px,10px,0px">
-  <div style="mso-line-height-rule:exactly;line-height:{h}px;text-align:center;color:{fg};font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;">
-   {safe}
-  </div>
- </v:textbox>
+ <center style="color:{fg} !important;font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;line-height:{h}px;mso-line-height-rule:exactly;text-align:center;">
+  {safe}
+ </center>
 </v:roundrect>
 <![endif]--><!--[if !mso]><!-->
-<span style="display:inline-block;background:{bg};color:{fg};padding:3px 10px;border-radius:999px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;">
+<span style="display:inline-block;background:{bg};color:{fg} !important;padding:6px 14px;border-radius:999px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;font-family:Arial,sans-serif;">
  {safe}
 </span>
 <!--<![endif]-->"""
 
     def pct_badge_html(pct_text: str, cls: str) -> str:
+        # Texto SIEMPRE blanco (como prefieres)
         if cls == "high":
             return badge_html(pct_text, "#16a34a", "#ffffff")
         if cls == "medium":
-            return badge_html(pct_text, "#f59e0b", "#111827")
+            # naranja algo más oscuro para contraste con blanco
+            return badge_html(pct_text, "#d97706", "#ffffff")
         if cls == "low":
             return badge_html(pct_text, "#dc2626", "#ffffff")
         return badge_html(pct_text, "#6b7280", "#ffffff")
