@@ -4,6 +4,7 @@ import time
 import base64
 import sqlite3
 import re
+import html as html_lib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -427,11 +428,11 @@ def construir_email_resumen():
     """
     - Pone la hora/fecha UNA vez (todas las lecturas del mismo instante).
     - Separa Barranco / Jinamar.
+    - HTML compatible con Outlook Desktop (tablas + VML para badges redondeados).
     - Devuelve subject, text, html.
     """
     latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
 
-    # Si no hay captura, inventamos “ahora” (pero será raro si ya capturas al arranque)
     if capture_dt is None:
         capture_dt = datetime.now(TZ)
 
@@ -486,17 +487,17 @@ def construir_email_resumen():
     # TEXTO (fallback)
     # -------------------
     txt_lines = []
-    txt_lines.append(f"Resumen automático de niveles")
+    txt_lines.append("Resumen automático de niveles")
     txt_lines.append(f"Lectura: {captura_str}")
     if dashboard_url:
         txt_lines.append(f"Panel: {dashboard_url}")
     txt_lines.append("")
-    txt_lines.append("BARRANCO")
+    txt_lines.append("CENTRAL BARRANCO")
     for r in rows_b:
         lvl = f"{r['vnum_str']} m" if r["vnum_str"] is not None else r["raw"]
         txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']} | Δ24h {r['delta_txt']}")
     txt_lines.append("")
-    txt_lines.append("JINAMAR")
+    txt_lines.append("CENTRAL JINAMAR")
     for r in rows_j:
         lvl = f"{r['vnum_str']} m" if r["vnum_str"] is not None else r["raw"]
         txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']} | Δ24h {r['delta_txt']}")
@@ -504,60 +505,91 @@ def construir_email_resumen():
     text_content = "\n".join(txt_lines)
 
     # -------------------
-    # HTML (bonito)
+    # HTML (Outlook Desktop friendly)
     # -------------------
-    # Colores email-safe (inline)
-    def badge_style(cls):
+    def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 12) -> str:
+        safe = html_lib.escape(text)
+        w = max(52, min(170, 26 + len(text) * 7))  # ancho aproximado
+        h = 22
+        return f"""<!--[if mso]>
+<v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
+ arcsize="50%" fillcolor="{bg}" stroke="f" style="height:{h}px;v-text-anchor:middle;width:{w}px;">
+ <w:anchorlock/>
+ <center style="color:{fg};font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;line-height:{h}px;">
+  {safe}
+ </center>
+</v:roundrect>
+<![endif]--><!--[if !mso]><!-->
+<span style="display:inline-block;background:{bg};color:{fg};padding:3px 10px;border-radius:999px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;">
+ {safe}
+</span>
+<!--<![endif]-->"""
+
+    def pct_badge_html(pct_text: str, cls: str) -> str:
         if cls == "high":
-            return "background:#16a34a;color:#ffffff;"
+            return badge_html(pct_text, "#16a34a", "#ffffff")
         if cls == "medium":
-            return "background:#f59e0b;color:#111827;"
+            return badge_html(pct_text, "#f59e0b", "#111827")
         if cls == "low":
-            return "background:#dc2626;color:#ffffff;"
-        return "background:#6b7280;color:#ffffff;"
+            return badge_html(pct_text, "#dc2626", "#ffffff")
+        return badge_html(pct_text, "#6b7280", "#ffffff")
 
     def render_table(rows, header_color, title):
-        # Tabla con filas alternas
         trs = []
         for i, r in enumerate(rows):
             bg = "#ffffff" if i % 2 == 0 else "#f8fafc"
-            lvl = f"{r['vnum_str']} <span style='color:#6b7280;font-size:12px;'>m</span>" if r["vnum_str"] is not None else f"<span style='color:#6b7280;'>{r['raw']}</span>"
-            pct_badge = (
-                f"<span style='display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;{badge_style(r['cls'])}'>"
-                f"{r['pct_str']}</span>"
-            )
-            delta_badge = (
-                f"<span style='display:inline-block;padding:3px 8px;border-radius:999px;font-weight:700;font-size:12px;background:{r['delta_color']};color:#ffffff;'>"
-                f"{r['delta_arrow']} {r['delta_txt']}</span>"
-            )
+            if r["vnum_str"] is not None:
+                lvl = f"""{html_lib.escape(r['vnum_str'])} <span style="color:#6b7280;font-size:12px;">m</span>"""
+            else:
+                lvl = f"""<span style="color:#6b7280;">{html_lib.escape(r['raw'])}</span>"""
+
+            pct_badge = pct_badge_html(r["pct_str"], r["cls"])
+            delta_badge = badge_html(f"{r['delta_arrow']} {r['delta_txt']}", r["delta_color"], "#ffffff")
+
             trs.append(
                 f"""
-                <tr style="background:{bg};">
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#111827;">{r['name']}</td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:800;color:#111827;white-space:nowrap;">{lvl}</td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;">{pct_badge}</td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;">{delta_badge}</td>
+                <tr bgcolor="{bg}" style="background:{bg};">
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;font-family:Arial,sans-serif;">
+                    {html_lib.escape(r['name'])}
+                  </td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:900;color:#111827;white-space:nowrap;font-family:Arial,sans-serif;">
+                    {lvl}
+                  </td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
+                    {pct_badge}
+                  </td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
+                    {delta_badge}
+                  </td>
                 </tr>
                 """
             )
 
-        return f"""
-           <div style="display:flex;align-items:center;justify-content:flex-start;gap:10px;">
-             <h2 style="margin:0;font-size:16px;color:#111827;display:flex;align-items:center;gap:8px;">
-               <span style="display:inline-block;padding:4px 10px;border-radius:999px;background:{header_color};color:#ffffff;font-weight:900;font-size:12px;letter-spacing:.3px;">
-                 CENTRAL <span style="font-weight:800;"> {title}</span>
-               </span>
-               
-             </h2>
-           </div>
+        # Título sin flex: "CENTRAL <nombre>"
+        title_block = f"""
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+               style="width:100%;border-collapse:collapse;margin:18px 0 10px 0;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+          <tr>
+            <td style="padding:0;">
+              {badge_html("CENTRAL", header_color, "#ffffff")}
+              <span style="font-family:Arial,sans-serif;font-size:16px;color:#111827;font-weight:900;margin-left:8px;vertical-align:middle;">
+                {html_lib.escape(title)}
+              </span>
+            </td>
+          </tr>
+        </table>
+        """
 
-        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+        return f"""
+        {title_block}
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"
+               style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;mso-table-lspace:0pt;mso-table-rspace:0pt;">
           <thead>
-            <tr style="background:{header_color};">
-              <th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;letter-spacing:.4px;">TANQUE</th>
-              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;">NIVEL</th>
-              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;">% MAX</th>
-              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;">Δ 24H</th>
+            <tr bgcolor="{header_color}" style="background:{header_color};">
+              <th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">TANQUE</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">NIVEL</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">% MAX</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">Δ 24H</th>
             </tr>
           </thead>
           <tbody>
@@ -569,37 +601,72 @@ def construir_email_resumen():
     panel_line = ""
     if dashboard_url:
         panel_line = f"""
-        <div style="margin-top:10px;">
-          <a href="{dashboard_url}" style="color:#2563eb;text-decoration:none;font-weight:700;">Abrir panel</a>
-          <span style="color:#94a3b8;font-size:12px;">(si tienes acceso desde fuera)</span>
-        </div>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+               style="width:100%;border-collapse:collapse;margin-top:10px;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+          <tr>
+            <td style="font-family:Arial,sans-serif;font-size:13px;color:#111827;">
+              <a href="{dashboard_url}" style="color:#2563eb;text-decoration:none;font-weight:900;">Abrir panel</a>
+              <span style="color:#94a3b8;font-size:12px;">(si tienes acceso desde fuera)</span>
+            </td>
+          </tr>
+        </table>
         """
 
+    # Layout completo con tablas + inner table fijo (Outlook respeta widths en tablas)
     html_content = f"""
-    <div style="background:#f1f5f9;padding:20px 0;">
-      <div style="max-width:760px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;font-family:Inter,Segoe UI,Arial,sans-serif;">
-        <div style="background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);padding:18px 18px;">
-          <div style="color:#ffffff;font-size:18px;font-weight:900;letter-spacing:.2px;">🏭 Monitor de Niveles de Combustible</div>
-          <div style="color:#cbd5e1;font-size:13px;margin-top:6px;">Lectura: <span style="color:#ffffff;font-weight:800;">{captura_str}</span></div>
-          <div style="color:#94a3b8;font-size:12px;margin-top:4px;">Incluye Δ 24h por tanque y % sobre máximo</div>
-        </div>
+<!--[if mso]>
+<style type="text/css">
+  table {{ border-collapse: collapse; }}
+  td, th, div, p, a, span {{ font-family: Arial, sans-serif !important; }}
+</style>
+<![endif]-->
 
-        <div style="padding:18px 18px 6px 18px;">
-          {panel_line}
-          {render_table(rows_b, "#2563eb", "Barranco")}
-          {render_table(rows_j, "#16a34a", "Jinamar")}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f5f9"
+       style="width:100%;background:#f1f5f9;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+  <tr>
+    <td align="center" style="padding:20px 10px;">
 
-          <div style="margin:14px 0 4px 0;color:#94a3b8;font-size:12px;line-height:1.35;">
-            Nota: El porcentaje se calcula sobre el máximo configurado en la aplicación. El Δ 24h compara el primer valor numérico disponible con el último en las últimas 24h.
-          </div>
-        </div>
+      <table role="presentation" width="760" cellpadding="0" cellspacing="0" border="0" align="center"
+             style="width:760px;max-width:760px;background:#ffffff;border:1px solid #e5e7eb;mso-table-lspace:0pt;mso-table-rspace:0pt;">
 
-        <div style="background:#f8fafc;padding:12px 18px;color:#64748b;font-size:12px;border-top:1px solid #e5e7eb;">
-          Envío automático · {captura_str}
-        </div>
-      </div>
-    </div>
-    """
+        <tr>
+          <td bgcolor="#203a43" style="background:#203a43;padding:18px;">
+            <div style="color:#ffffff;font-size:18px;font-weight:900;letter-spacing:.2px;font-family:Arial,sans-serif;">
+              🏭 Monitor de Niveles de Combustible
+            </div>
+            <div style="color:#cbd5e1;font-size:13px;margin-top:6px;font-family:Arial,sans-serif;">
+              Lectura: <span style="color:#ffffff;font-weight:900;">{captura_str}</span>
+            </div>
+            <div style="color:#94a3b8;font-size:12px;margin-top:4px;font-family:Arial,sans-serif;">
+              Incluye Δ 24h por tanque y % sobre máximo
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:18px;">
+            {panel_line}
+            {render_table(rows_b, "#2563eb", "Barranco")}
+            {render_table(rows_j, "#16a34a", "Jinamar")}
+
+            <div style="margin:14px 0 4px 0;color:#94a3b8;font-size:12px;line-height:1.35;font-family:Arial,sans-serif;">
+              Nota: El porcentaje se calcula sobre el máximo configurado en la aplicación. El Δ 24h compara el primer valor numérico disponible con el último en las últimas 24h.
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td bgcolor="#f8fafc" style="background:#f8fafc;padding:12px 18px;color:#64748b;font-size:12px;border-top:1px solid #e5e7eb;font-family:Arial,sans-serif;">
+            Envío automático · {captura_str}
+          </td>
+        </tr>
+
+      </table>
+
+    </td>
+  </tr>
+</table>
+"""
 
     return subject, text_content, html_content
 
@@ -1028,5 +1095,3 @@ if __name__ == "__main__":
     enviar_resumen_programado()
 
     app.run(host="0.0.0.0", port=5000)
-
-
