@@ -29,7 +29,7 @@ TZ = ZoneInfo("Atlantic/Canary")
 
 USERNAME = r"enelint\es43282213p"
 PASSWORD1 = os.getenv("SCRAP_PASS1", "")
-PASSWORD2 = os.getenv("SCRAP_PASS2", "")  # reservado por si lo necesitas
+PASSWORD2 = os.getenv("SCRAP_PASS2", "")
 
 # Persistencia (Coolify Volume montado en /app/data)
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
@@ -426,11 +426,7 @@ def obtener_latest_y_deltas_24h():
 
 def construir_email_resumen():
     """
-    Correcciones:
-    - Badges sin “corte” vertical: aumentamos altura/line-height/padding.
-    - Texto de badges SIEMPRE en blanco (también en Outlook Desktop) con !important.
-    - Nombre de central dentro del badge: "CENTRAL BARRANCO" / "CENTRAL JINAMAR".
-    - HTML compatible con Outlook Desktop (tablas + VML).
+    Construye el HTML para el email, compatible con Outlook Desktop (VML).
     """
     latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
 
@@ -510,42 +506,37 @@ def construir_email_resumen():
     # -------------------
     def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 12) -> str:
         """
-        Badge con:
-        - VML para Outlook Desktop (Word engine) con center + height suficiente.
-        - Span normal para clientes modernos.
-        Ajustes para evitar:
-        - texto negro en Outlook: forzamos color en center.
-        - “corte” vertical: height 28 + line-height 28 + padding en span.
+        Badge compatible con Outlook.
+        USO DE <v:textbox>: Esto es crucial para que Outlook respete el color del texto blanco.
+        Sin v:textbox, Outlook aplica su color por defecto (negro/gris) al texto dentro de formas VML.
         """
         safe = html_lib.escape(text)
 
-        # ancho aproximado (VML necesita width fijo)
-        # margen generoso para "CENTRAL BARRANCO"
-        w = max(110, min(320, 46 + int(len(text) * 7.8)))
+        # ancho aproximado
+        w = max(110, min(320, 46 + int(len(text) * 8)))
         h = 28
 
-        # Nota: center con line-height igual a altura ayuda a que no se recorte
         return f"""<!--[if mso]>
 <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
- arcsize="50%" fillcolor="{bg}" strokecolor="{bg}" strokeweight="1px"
- style="height:{h}px;width:{w}px;v-text-anchor:middle;">
- <w:anchorlock/>
- <center style="color:{fg} !important;font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;line-height:{h}px;mso-line-height-rule:exactly;text-align:center;">
+ href="#" style="height:{h}px;v-text-anchor:middle;width:{w}px;" arcsize="50%" stroke="f" fillcolor="{bg}">
+<w:anchorlock/>
+<v:textbox inset="0,0,0,0">
+  <center style="color:{fg};font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;mso-line-height-rule:exactly;line-height:{h}px;">
   {safe}
- </center>
+  </center>
+</v:textbox>
 </v:roundrect>
 <![endif]--><!--[if !mso]><!-->
-<span style="display:inline-block;background:{bg};color:{fg} !important;padding:6px 14px;border-radius:999px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;font-family:Arial,sans-serif;">
+<span style="display:inline-block;background:{bg};color:{fg} !important;padding:6px 14px;border-radius:14px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;font-family:Arial,sans-serif;">
  {safe}
 </span>
 <!--<![endif]-->"""
 
     def pct_badge_html(pct_text: str, cls: str) -> str:
-        # Texto SIEMPRE blanco (como prefieres)
+        # Texto SIEMPRE blanco
         if cls == "high":
             return badge_html(pct_text, "#16a34a", "#ffffff")
         if cls == "medium":
-            # naranja algo más oscuro para contraste con blanco
             return badge_html(pct_text, "#d97706", "#ffffff")
         if cls == "low":
             return badge_html(pct_text, "#dc2626", "#ffffff")
@@ -583,7 +574,6 @@ def construir_email_resumen():
                 """
             )
 
-        # Badge único: "CENTRAL BARRANCO" / "CENTRAL JINAMAR"
         label = f"CENTRAL {central_name.upper()}"
 
         title_block = f"""
