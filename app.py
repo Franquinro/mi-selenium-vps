@@ -426,7 +426,7 @@ def obtener_latest_y_deltas_24h():
 
 def construir_email_resumen():
     """
-    Construye el HTML para el email, compatible con Outlook Desktop (VML).
+    Construye el HTML para el email, compatible con Outlook Desktop (VML + Tablas).
     """
     latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
 
@@ -507,8 +507,11 @@ def construir_email_resumen():
     def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 12) -> str:
         """
         Badge compatible con Outlook.
-        USO DE <v:textbox>: Esto es crucial para que Outlook respete el color del texto blanco.
-        Sin v:textbox, Outlook aplica su color por defecto (negro/gris) al texto dentro de formas VML.
+        SOLUCIÓN:
+        - Usamos <v:textbox> para forzar el color blanco (evita que Outlook lo ponga negro).
+        - DENTRO del textbox, usamos una <TABLE> con valign="middle".
+          Esto es necesario porque <center> o <div> con line-height fallan dentro de un textbox
+          (provocando el corte o desplazamiento vertical).
         """
         safe = html_lib.escape(text)
 
@@ -518,12 +521,16 @@ def construir_email_resumen():
 
         return f"""<!--[if mso]>
 <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
- href="#" style="height:{h}px;v-text-anchor:middle;width:{w}px;" arcsize="50%" stroke="f" fillcolor="{bg}">
+ href="#" style="height:{h}px;width:{w}px;" arcsize="50%" stroke="f" fillcolor="{bg}">
 <w:anchorlock/>
 <v:textbox inset="0,0,0,0">
-  <center style="color:{fg};font-family:Arial,sans-serif;font-size:{font_size}px;font-weight:bold;mso-line-height-rule:exactly;line-height:{h}px;">
-  {safe}
-  </center>
+  <table cellspacing="0" cellpadding="0" border="0" width="{w}" height="{h}">
+    <tr>
+      <td align="center" valign="middle" style="color:{fg}; font-family:Arial, sans-serif; font-size:{font_size}px; font-weight:bold; text-align:center;">
+        {safe}
+      </td>
+    </tr>
+  </table>
 </v:textbox>
 </v:roundrect>
 <![endif]--><!--[if !mso]><!-->
