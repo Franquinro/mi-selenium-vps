@@ -457,9 +457,6 @@ def construir_email_resumen():
             elif raw in ("---", "Error"):
                 cls = "error"
 
-            delta = deltas.get(tag)
-            delta_txt, delta_color, delta_arrow = _delta_badge(delta)
-
             rows.append(
                 {
                     "name": (rec["descripcion"] if rec else descripcion),
@@ -470,9 +467,6 @@ def construir_email_resumen():
                     "pct": pct,
                     "pct_str": (f"{pct:.1f}%" if pct is not None else "—"),
                     "cls": cls,
-                    "delta_txt": delta_txt,
-                    "delta_color": delta_color,
-                    "delta_arrow": delta_arrow,
                 }
             )
         return rows
@@ -492,12 +486,12 @@ def construir_email_resumen():
     txt_lines.append("CENTRAL BARRANCO")
     for r in rows_b:
         lvl = f"{r['vnum_str']} m" if r["vnum_str"] is not None else r["raw"]
-        txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']} | Δ24h {r['delta_txt']}")
+        txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']}")
     txt_lines.append("")
     txt_lines.append("CENTRAL JINAMAR")
     for r in rows_j:
         lvl = f"{r['vnum_str']} m" if r["vnum_str"] is not None else r["raw"]
-        txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']} | Δ24h {r['delta_txt']}")
+        txt_lines.append(f"- {r['name']}: {lvl} | {r['pct_str']}")
 
     text_content = "\n".join(txt_lines)
 
@@ -557,7 +551,6 @@ def construir_email_resumen():
                 lvl = f"""<span style="color:#6b7280;">{html_lib.escape(r['raw'])}</span>"""
 
             pct_badge = pct_badge_html(r["pct_str"], r["cls"])
-            delta_badge = badge_html(f"{r['delta_arrow']} {r['delta_txt']}", r["delta_color"], "#ffffff")
 
             trs.append(
                 f"""
@@ -570,9 +563,6 @@ def construir_email_resumen():
                   </td>
                   <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
                     {pct_badge}
-                  </td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
-                    {delta_badge}
                   </td>
                 </tr>
                 """
@@ -600,7 +590,6 @@ def construir_email_resumen():
               <th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">TANQUE</th>
               <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">NIVEL</th>
               <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">% MAX</th>
-              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">Δ 24H</th>
             </tr>
           </thead>
           <tbody>
@@ -648,7 +637,7 @@ def construir_email_resumen():
               Lectura: <span style="color:#ffffff;font-weight:900;">{captura_str}</span>
             </div>
             <div style="color:#94a3b8;font-size:12px;margin-top:4px;font-family:Arial,sans-serif;">
-              Incluye Δ 24h por tanque y % sobre máximo
+              Incluye % sobre máximo
             </div>
           </td>
         </tr>
@@ -660,7 +649,7 @@ def construir_email_resumen():
             {render_table(rows_j, "#16a34a", "Jinamar")}
 
             <div style="margin:14px 0 4px 0;color:#94a3b8;font-size:12px;line-height:1.35;font-family:Arial,sans-serif;">
-              Nota: El porcentaje se calcula sobre el máximo configurado en la aplicación. El Δ 24h compara el primer valor numérico disponible con el último en las últimas 24h.
+              Nota: El porcentaje se calcula sobre el máximo configurado en la aplicación.
             </div>
           </td>
         </tr>
