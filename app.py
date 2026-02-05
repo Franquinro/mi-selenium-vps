@@ -1071,12 +1071,12 @@ if __name__ == "__main__":
         id="captura_niveles_15m",
     )
 
-    # Email a las 04:05, 12:05 y 18:05 (hora Canarias)
+    # Email a las 04:01, 12:01 y 21:01 (hora Canarias)
     scheduler.add_job(
         func=enviar_resumen_programado,
         trigger="cron",
-        hour="4,12,18",
-        minute=5,
+        hour="4,12,21",
+        minute=1,
         second=0,
         max_instances=1,
         coalesce=True,
@@ -1094,3 +1094,4 @@ if __name__ == "__main__":
     enviar_resumen_programado()
 
     app.run(host="0.0.0.0", port=5000)
+
