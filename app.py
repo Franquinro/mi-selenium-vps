@@ -1075,6 +1075,7 @@ def index():
 @app.route("/debug")
 def debug():
     if os.path.exists(SCREENSHOT_PATH):
+        return send_file(SCREENSHOT_PATH, mimetype="image/png")
     return "Captura no disponible", 404
 
 
