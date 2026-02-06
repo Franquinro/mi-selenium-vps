@@ -27,7 +27,7 @@ app = Flask(__name__)
 # -------------------
 TZ = ZoneInfo("Atlantic/Canary")
 
-USERNAME = r"enelint\es43282213p"
+USERNAME = r"enelint\es" + os.getenv("USER_DNI", "")
 PASSWORD1 = os.getenv("SCRAP_PASS1", "")
 PASSWORD2 = os.getenv("SCRAP_PASS2", "")
 
@@ -184,6 +184,21 @@ def ejecutar_scrapping():
 
     except Exception as e:
         print(f"Error detectado: {e}")
+        # Enviar alerta de fallo (solo al admin)
+        try:
+            admin_mails = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
+            if admin_mails:
+                error_html = f"<h3>Error en el Scrapping</h3><p>Se ha detectado un error al intentar capturar los datos:</p><pre>{e}</pre>"
+                enviar_email_brevo_api(
+                    subject="⚠️ ALERTA: Fallo Scrapping Niveles",
+                    text_content=f"Error Scrapping: {e}",
+                    html_content=error_html,
+                    recipients=[admin_mails[0]]
+                )
+        except Exception as ex_mail:
+            print(f"No se pudo enviar email de alerta: {ex_mail}")
+
+
         try:
             driver.save_screenshot(SCREENSHOT_PATH)
         except Exception:
@@ -289,11 +304,15 @@ def build_trends(df_24h: pd.DataFrame):
 # -------------------
 # BREVO API (EMAIL)
 # -------------------
-def enviar_email_brevo_api(subject: str, text_content: str, html_content: str):
+def enviar_email_brevo_api(subject: str, text_content: str, html_content: str, recipients: list = None):
     api_key = os.getenv("BREVO_API_KEY", "").strip()
     mail_from = os.getenv("MAIL_FROM", "").strip()
     mail_from_name = os.getenv("MAIL_FROM_NAME", "").strip()
-    mail_to = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
+    
+    if recipients:
+        mail_to = recipients
+    else:
+        mail_to = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
 
     if not api_key:
         print("Brevo(API): falta BREVO_API_KEY")
@@ -670,10 +689,18 @@ def construir_email_resumen():
     return subject, text_content, html_content
 
 
-def enviar_resumen_programado():
+def enviar_resumen_programado(only_admin=False):
     try:
         subject, text_content, html_content = construir_email_resumen()
-        enviar_email_brevo_api(subject, text_content, html_content)
+        
+        recipients = None
+        if only_admin:
+            all_mails = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
+            if all_mails:
+                recipients = [all_mails[0]]
+                subject = f"[DEPLOY] {subject}"
+        
+        enviar_email_brevo_api(subject, text_content, html_content, recipients=recipients)
     except Exception as e:
         print(f"Email: error enviando resumen: {e}")
 
@@ -1090,8 +1117,8 @@ if __name__ == "__main__":
     # Primera captura al arrancar
     ejecutar_scrapping()
 
-    # Envío inmediato al arrancar (para testear)
-    enviar_resumen_programado()
+    # Envío inmediato al arrancar (solo admin)
+    enviar_resumen_programado(only_admin=True)
 
     app.run(host="0.0.0.0", port=5000)
 
