@@ -195,6 +195,8 @@ def ejecutar_scrapping():
                     html_content=error_html,
                     recipients=[admin_mails[0]]
                 )
+            else:
+                print("ALERTA FALLIDA: No hay destinatarios en MAIL_TO para enviar el aviso de error.")
         except Exception as ex_mail:
             print(f"No se pudo enviar email de alerta: {ex_mail}")
 
@@ -1073,8 +1075,40 @@ def index():
 @app.route("/debug")
 def debug():
     if os.path.exists(SCREENSHOT_PATH):
-        return send_file(SCREENSHOT_PATH, mimetype="image/png")
     return "Captura no disponible", 404
+
+
+@app.route("/test-email")
+def test_email():
+    """Ruta para probar el envío de emails y ver errores en pantalla."""
+    import io
+    from contextlib import redirect_stdout
+    
+    f = io.StringIO()
+    try:
+        with redirect_stdout(f):
+            print("--- Iniciando prueba de email ---")
+            mail_to_env = os.getenv("MAIL_TO", "")
+            print(f"MAIL_TO env: '{mail_to_env}'")
+            
+            admin_mails = [x.strip() for x in mail_to_env.split(",") if x.strip()]
+            print(f"Destinatarios parseados: {admin_mails}")
+            
+            if not admin_mails:
+                return f"ERROR: No se encontraron destinatarios en MAIL_TO. Logs:\n{f.getvalue()}", 400
+
+            print(f"Intentando enviar a: {admin_mails[0]} (Admin)")
+            enviar_email_brevo_api(
+                subject="Test Manual de Correo",
+                text_content="Si lees esto, el envío funciona correctamente.",
+                html_content="<h1>Test OK</h1><p>El sistema de correo funciona.</p>",
+                recipients=[admin_mails[0]]
+            )
+            print("--- Fin prueba ---")
+            
+        return f"Proceso finalizado. Logs:\n{f.getvalue()}", 200
+    except Exception as e:
+        return f"EXCEPCIÓN: {e}\nLogs parciales:\n{f.getvalue()}", 500
 
 
 # -------------------
