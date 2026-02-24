@@ -46,7 +46,7 @@ DISPLAY_HASH = f"#/Displays/{DISPLAY_ID}/Balance-Combustible-Bco?mode=kiosk&hide
 
 # Tupla con (tag, descripción, nivel_máximo_metros)
 DATOS_A_BUSCAR = (
-    (r"\PI-BRRC-S1\BRRC00-0LBL111A", "TANQUE ALMACEN FO", 18),
+    (r"\PI-BRRC-S1\BRRC00-0LBL111A2", "TANQUE ALMACEN FO", 18),
     (r"\PI-BRRC-S1\BRRC00-0LBL111B", "TANQUE ALMACEN GO A", 18),
     (r"\PI-BRRC-S1\BRRC00-0LBL111C", "TANQUE ALMACEN GO B", 18),
     (r"\PI-BRRC-S1\BRRC036EGD20CL001JT01A", "TANQUE DIARIO GO 1", 13),
