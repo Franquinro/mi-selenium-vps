@@ -1205,6 +1205,36 @@ def api_agua_ultimo():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/agua/force")
+def api_agua_force():
+    """Ruta para forzar una captura de niveles (incluyendo agua) y ver logs."""
+    import io
+    from contextlib import redirect_stdout
+    
+    f = io.StringIO()
+    try:
+        with redirect_stdout(f):
+            print("--- Iniciando captura FORZADA (con agua) ---")
+            ejecutar_scrapping(incluir_agua=True)
+            print("--- Captura finalizada con éxito ---")
+        
+        # Mostramos los logs y permitimos ir al endpoint de datos
+        logs = f.getvalue()
+        return f"""
+        <html>
+            <body style="font-family: monospace; background: #1a1a1a; color: #00ff00; padding: 20px;">
+                <h2>Captura Forzada Finalizada</h2>
+                <pre>{logs}</pre>
+                <hr>
+                <p>Ver resultados en JSON: <a href="/api/agua/ultimo" style="color: #4da6ff;">/api/agua/ultimo</a></p>
+                <p><a href="/" style="color: #4da6ff;">Volver al Inicio</a></p>
+            </body>
+        </html>
+        """, 200
+    except Exception as e:
+        return f"ERROR: {e}<br><pre>{f.getvalue()}</pre>", 500
+
+
 def job_captura_niveles():
     """Wrapper para decidir si incluimos agua basándonos en la hora."""
     now = datetime.now(TZ)
