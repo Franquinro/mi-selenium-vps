@@ -192,6 +192,9 @@ def ejecutar_scrapping(incluir_agua=False):
         time.sleep(5)
         driver.save_screenshot(SCREENSHOT_PATH)
 
+        conn = _db_connect()
+        cur = conn.cursor()
+
         # 1. Scrapping de Combustible (Comportamiento habitual)
         for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
             try:
