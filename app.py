@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
-from flask import Flask, render_template_string, send_file
+from flask import Flask, render_template_string, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from selenium import webdriver
@@ -63,6 +63,27 @@ ORDER_TAGS = [t[0] for t in DATOS_A_BUSCAR]
 BARRANCO_TAGS = set(ORDER_TAGS[:8])
 JINAMAR_TAGS = set(ORDER_TAGS[8:])
 
+# Nuevos puntos de Agua (Contadores y niveles)
+DATOS_AGUA = (
+    ("BRRC0210GCG41CF001QT", "Desaladora nº 2"),
+    ("BRRC0235GCG41CF001JT01AQT", "Desaladora nº 3"),
+    ("BRRC0235GCG81CF001JT01AQT", "Desaladora nº 4"),
+    ("BRRC01-1LTAQ101", "Desmineralizada A"),
+    ("BRRC02-2LTAQ101", "Desmineralizada B"),
+    ("BRRC0235GDK10CL001JT01A", "Desalada A"),
+    ("BRRC0235GDK20CL001JT01A", "Desalada B"),
+    ("BRRC0210GAD01CL901XQ01", "Desalada C"),
+    ("BRRC0-0LTKC001", "Contra incendio"),
+    ("BRRC01-1LTAF118", "Reserva Condensado TV01"),
+    ("BRRC02-2LTAF118", "Reserva Condensado TV02"),
+    ("BRRC0-0LTAQ100", "Agua Inyección TG01/TG02"),
+    ("BRRC033GCK30CL001JT01A", "Reserva Condensado TV03"),
+    ("BRRC033GCK30CL003JT01A", "Agua Inyección TG03/TG04"),
+    ("BRRC0210GCK01CL901XQ01", "Agua Inyección TG05/TG06"),
+    ("BRRC0210GCK41CL901XQ01", "Reserva Condensado TV04"),
+    ("BRRC0-0LTAP115", "Agua Potable y Riego"),
+)
+
 
 # -------------------
 # DB
@@ -88,6 +109,19 @@ def init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_lecturas_tag_ts ON lecturas(tag, ts);")
+
+    # Tabla para niveles de agua (Contadores y niveles)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lecturas_agua (
+            tag TEXT NOT NULL,
+            descripcion TEXT NOT NULL,
+            valor TEXT NOT NULL,
+            ts TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lecturas_agua_tag_ts ON lecturas_agua(tag, ts);")
     conn.close()
 
 
@@ -128,9 +162,9 @@ def build_driver():
     return driver
 
 
-def ejecutar_scrapping():
+def ejecutar_scrapping(incluir_agua=False):
     ts_now = datetime.now(TZ).isoformat(timespec="seconds")
-    print(f"[{ts_now}] Iniciando captura...")
+    print(f"[{ts_now}] Iniciando captura (agua={incluir_agua})...")
 
     driver = build_driver()
     try:
@@ -158,9 +192,7 @@ def ejecutar_scrapping():
         time.sleep(5)
         driver.save_screenshot(SCREENSHOT_PATH)
 
-        conn = _db_connect()
-        cur = conn.cursor()
-
+        # 1. Scrapping de Combustible (Comportamiento habitual)
         for tag, descripcion, nivel_max in DATOS_A_BUSCAR:
             try:
                 elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
@@ -177,6 +209,26 @@ def ejecutar_scrapping():
                     "INSERT INTO lecturas(tag, descripcion, valor, ts, nivel_max) VALUES (?, ?, ?, ?, ?)",
                     (tag, descripcion, "Error", ts_now, float(nivel_max)),
                 )
+
+        # 2. Scrapping de Agua (Solo si incluir_agua es True)
+        if incluir_agua:
+            print("Capturando datos de agua...")
+            for tag, descripcion in DATOS_AGUA:
+                try:
+                    elemento = driver.find_element(By.XPATH, f"//div[contains(@title, '{tag}')]")
+                    valor = (elemento.text or "").strip()
+                    if not valor:
+                        valor = driver.execute_script("return arguments[0].innerText;", elemento).strip()
+
+                    cur.execute(
+                        "INSERT INTO lecturas_agua(tag, descripcion, valor, ts) VALUES (?, ?, ?, ?)",
+                        (tag, descripcion, valor or "---", ts_now),
+                    )
+                except Exception:
+                    cur.execute(
+                        "INSERT INTO lecturas_agua(tag, descripcion, valor, ts) VALUES (?, ?, ?, ?)",
+                        (tag, descripcion, "Error", ts_now),
+                    )
 
         conn.commit()
         conn.close()
@@ -1112,6 +1164,55 @@ def test_email():
         return f"EXCEPCIÓN: {e}\nLogs parciales:\n{f.getvalue()}", 500
 
 
+@app.route("/api/agua/ultimo")
+def api_agua_ultimo():
+    """Retorna el último registro de cada punto de agua en formato JSON."""
+    try:
+        conn = _db_connect()
+        # Query para obtener la última lectura de cada tag en lecturas_agua
+        df = pd.read_sql_query(
+            """
+            SELECT l.tag, l.descripcion, l.valor, l.ts
+            FROM lecturas_agua l
+            JOIN (
+                SELECT tag, MAX(ts) AS max_ts
+                FROM lecturas_agua
+                GROUP BY tag
+            ) m ON l.tag = m.tag AND l.ts = m.max_ts
+            """,
+            conn
+        )
+        conn.close()
+
+        if df.empty:
+            return jsonify({"status": "no_data", "data": []}), 200
+
+        res = []
+        for _, row in df.iterrows():
+            res.append({
+                "tag": row["tag"],
+                "descripcion": row["descripcion"],
+                "valor": row["valor"],
+                "ts": row["ts"]
+            })
+        
+        return jsonify({
+            "status": "ok",
+            "count": len(res),
+            "data": res
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def job_captura_niveles():
+    """Wrapper para decidir si incluimos agua basándonos en la hora."""
+    now = datetime.now(TZ)
+    # Incluimos agua si son las 12h (captura de las 12:00)
+    incluir_agua = (now.hour == 12 and now.minute == 0)
+    ejecutar_scrapping(incluir_agua=incluir_agua)
+
+
 # -------------------
 # MAIN
 # -------------------
@@ -1122,7 +1223,7 @@ if __name__ == "__main__":
 
     # Captura alineada a xx:00, xx:15, xx:30, xx:45
     scheduler.add_job(
-        func=ejecutar_scrapping,
+        func=job_captura_niveles,
         trigger="cron",
         minute="0,15,30,45",
         second=0,
