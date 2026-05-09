@@ -183,6 +183,7 @@ def ejecutar_scrapping(incluir_agua=False):
         return
     
     SCRAPPING_RUNNING = True
+    driver = None
     ts_now = datetime.now(TZ).isoformat(timespec="seconds")
     print(f"[{ts_now}] Iniciando captura (agua={incluir_agua})...")
 
@@ -281,10 +282,11 @@ def ejecutar_scrapping(incluir_agua=False):
         except Exception:
             pass
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
         SCRAPPING_RUNNING = False
 
 
@@ -1287,11 +1289,22 @@ if __name__ == "__main__":
 
     scheduler.start()
 
-    # Primera captura al arrancar
-    ejecutar_scrapping()
-
-    # Envío inmediato al arrancar (solo admin)
-    enviar_resumen_programado(only_admin=True)
+    # Ejecutar primera captura y email de deploy en segundo plano (vía scheduler)
+    # para no bloquear el arranque de la web.
+    scheduler.add_job(
+        func=ejecutar_scrapping,
+        trigger="date",
+        run_date=datetime.now(TZ) + timedelta(seconds=1),
+        id="startup_scrapping"
+    )
+    
+    scheduler.add_job(
+        func=enviar_resumen_programado,
+        trigger="date",
+        run_date=datetime.now(TZ) + timedelta(seconds=10),
+        args=[True], # only_admin=True
+        id="startup_email"
+    )
 
     app.run(host="0.0.0.0", port=5000)
 
