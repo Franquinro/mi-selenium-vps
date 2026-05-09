@@ -1311,17 +1311,34 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler(timezone=TZ)
 
-    # Captura alineada a xx:00, xx:15, xx:30, xx:45
+    # Captura cada 2h en horas pares (00, 02, 04 ... 22)
+    # Cubre las capturas previas a los emails de las 04:01 y 12:01
     scheduler.add_job(
         func=job_captura_niveles,
         trigger="cron",
-        minute="0,15,30,45",
+        hour="0,2,4,6,8,10,12,14,16,18,20,22",
+        minute=0,
         second=0,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=120,
+        misfire_grace_time=300,
         replace_existing=True,
-        id="captura_niveles_15m",
+        id="captura_niveles_2h",
+    )
+
+    # Captura fija a las 21:00 (previa al email de las 21:01)
+    # Las 21h son impares y no quedan cubiertas por el job anterior
+    scheduler.add_job(
+        func=job_captura_niveles,
+        trigger="cron",
+        hour=21,
+        minute=0,
+        second=0,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
+        replace_existing=True,
+        id="captura_niveles_21h",
     )
 
     # Email a las 04:01, 12:01 y 21:01 (hora Canarias)
