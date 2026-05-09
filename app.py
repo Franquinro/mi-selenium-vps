@@ -4,6 +4,7 @@ import time
 import base64
 import sqlite3
 import re
+import subprocess
 import html as html_lib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -137,14 +138,33 @@ def set_basic_auth_header(driver, user, password):
     )
 
 
+def _kill_orphan_chrome():
+    """Elimina procesos chrome/chromedriver huérfanos para liberar recursos."""
+    try:
+        subprocess.run(["pkill", "-f", "chrome"], capture_output=True)
+        subprocess.run(["pkill", "-f", "chromedriver"], capture_output=True)
+        time.sleep(1)
+    except Exception as e:
+        print(f"[build_driver] No se pudo limpiar procesos huérfanos: {e}")
+
+
 def build_driver():
+    _kill_orphan_chrome()
+
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument(f"--window-size={WINDOW_W},{WINDOW_H}")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--single-process")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
+    # Usar binario local si está configurado (evita que selenium-manager descargue de internet)
+    chrome_binary = os.getenv("CHROME_BIN", "").strip()
+    if chrome_binary:
+        options.binary_location = chrome_binary
 
     driver = webdriver.Chrome(options=options)
 
@@ -506,11 +526,27 @@ def construir_email_resumen():
     """
     latest_map, deltas, capture_dt = obtener_latest_y_deltas_24h()
 
+    now = datetime.now(TZ)
     if capture_dt is None:
-        capture_dt = datetime.now(TZ)
+        capture_dt = now
 
     captura_str = _fmt_dt_local(capture_dt)
-    subject = f"Niveles combustible - {captura_str}"
+
+    # Detectar datos obsoletos (más de 2 horas de antigüedad)
+    datos_obsoletos = False
+    horas_retraso = 0.0
+    if capture_dt is not None:
+        # Normalizar a aware si fuera naive
+        cap_aware = capture_dt if capture_dt.tzinfo else capture_dt.replace(tzinfo=TZ)
+        diff = now - cap_aware
+        horas_retraso = diff.total_seconds() / 3600
+        if horas_retraso > 2:
+            datos_obsoletos = True
+
+    if datos_obsoletos:
+        subject = f"⚠️ DATOS DESACTUALIZADOS ({horas_retraso:.0f}h) - Niveles combustible - {captura_str}"
+    else:
+        subject = f"Niveles combustible - {captura_str}"
 
     dashboard_url = os.getenv("DASHBOARD_URL", "").strip()
 
@@ -717,6 +753,20 @@ def construir_email_resumen():
             </div>
           </td>
         </tr>
+
+        {"" if not datos_obsoletos else f"""
+        <tr>
+          <td bgcolor="#b45309" style="background:#b45309;padding:12px 18px;">
+            <div style="color:#ffffff;font-size:14px;font-weight:900;font-family:Arial,sans-serif;">
+              &#9888;&#65039; AVISO: DATOS DESACTUALIZADOS
+            </div>
+            <div style="color:#fef3c7;font-size:13px;margin-top:4px;font-family:Arial,sans-serif;">
+              La &uacute;ltima captura exitosa fue hace <strong>{horas_retraso:.0f} horas</strong> ({captura_str}).
+              El scraping fall&oacute; desde entonces &mdash; estos datos pueden no reflejar el estado actual.
+            </div>
+          </td>
+        </tr>
+        """}
 
         <tr>
           <td style="padding:18px;">
