@@ -16,7 +16,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -147,17 +146,7 @@ def build_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-    # Intentar usar binarios del sistema si existen (Docker)
-    if os.path.exists("/usr/bin/chromium"):
-        options.binary_location = "/usr/bin/chromium"
-    
-    chromedriver_path = "/usr/bin/chromedriver"
-    if os.path.exists(chromedriver_path):
-        service = Service(executable_path=chromedriver_path)
-        driver = webdriver.Chrome(service=service, options=options)
-    else:
-        # Fallback a Selenium Manager (local o entornos sin path fijo)
-        driver = webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(options=options)
 
     driver.execute_cdp_cmd(
         "Page.addScriptToEvaluateOnNewDocument",
@@ -173,17 +162,7 @@ def build_driver():
     return driver
 
 
-# Global lock for scraping
-SCRAPPING_RUNNING = False
-
 def ejecutar_scrapping(incluir_agua=False):
-    global SCRAPPING_RUNNING
-    if SCRAPPING_RUNNING:
-        print("Scrapping ya en curso. Omitiendo esta ejecución.")
-        return
-    
-    SCRAPPING_RUNNING = True
-    driver = None
     ts_now = datetime.now(TZ).isoformat(timespec="seconds")
     print(f"[{ts_now}] Iniciando captura (agua={incluir_agua})...")
 
@@ -282,12 +261,7 @@ def ejecutar_scrapping(incluir_agua=False):
         except Exception:
             pass
     finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        SCRAPPING_RUNNING = False
+        driver.quit()
 
 
 # -------------------
@@ -535,17 +509,8 @@ def construir_email_resumen():
     if capture_dt is None:
         capture_dt = datetime.now(TZ)
 
-    # Comprobar si el dato es antiguo (más de 60 min)
-    is_stale = False
-    if capture_dt:
-        age = datetime.now(TZ) - capture_dt
-        if age > timedelta(minutes=60):
-            is_stale = True
-
     captura_str = _fmt_dt_local(capture_dt)
     subject = f"Niveles combustible - {captura_str}"
-    if is_stale:
-        subject = f"⚠️ [DATOS ANTIGUOS] {subject}"
 
     dashboard_url = os.getenv("DASHBOARD_URL", "").strip()
 
@@ -609,14 +574,125 @@ def construir_email_resumen():
     # -------------------
     # HTML (Outlook Desktop friendly)
     # -------------------
-    # -------------------
-    # HTML (Outlook Desktop friendly)
-    # -------------------
-    html_content = """
+    def badge_html(text: str, bg: str, fg: str = "#ffffff", font_size: int = 13) -> str:
+        """
+        Badge compatible con Outlook (versión ajustada):
+        - Aumentado font_size a 13px (negrita).
+        - Aumentado height (h) a 30px para dar más espacio.
+        - Añadido padding-top:2px al <td> para empujar visualmente el texto al centro vertical.
+        """
+        safe = html_lib.escape(text)
+
+        # ancho aproximado (incrementado factor para fuente 13px)
+        w = max(110, min(320, 50 + int(len(text) * 9)))
+        h = 30  # Altura aumentada
+
+        return f"""<!--[if mso]>
+<v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word"
+ href="#" style="height:{h}px;width:{w}px;" arcsize="50%" stroke="f" fillcolor="{bg}">
+<w:anchorlock/>
+<v:textbox inset="0,0,0,0">
+  <table cellspacing="0" cellpadding="0" border="0" width="{w}" height="{h}">
+    <tr>
+      <td align="center" valign="middle" style="padding-top:2px; color:{fg}; font-family:Arial, sans-serif; font-size:{font_size}px; font-weight:bold; text-align:center;">
+        {safe}
+      </td>
+    </tr>
+  </table>
+</v:textbox>
+</v:roundrect>
+<![endif]--><!--[if !mso]><!-->
+<span style="display:inline-block;background:{bg};color:{fg} !important;padding:7px 14px;border-radius:15px;font-weight:800;font-size:{font_size}px;line-height:16px;white-space:nowrap;font-family:Arial,sans-serif;">
+ {safe}
+</span>
+<!--<![endif]-->"""
+
+    def pct_badge_html(pct_text: str, cls: str) -> str:
+        if cls == "high":
+            return badge_html(pct_text, "#16a34a", "#ffffff")
+        if cls == "medium":
+            return badge_html(pct_text, "#d97706", "#ffffff")
+        if cls == "low":
+            return badge_html(pct_text, "#dc2626", "#ffffff")
+        return badge_html(pct_text, "#6b7280", "#ffffff")
+
+    def render_table(rows, header_color, central_name):
+        trs = []
+        for i, r in enumerate(rows):
+            bg = "#ffffff" if i % 2 == 0 else "#f8fafc"
+
+            if r["vnum_str"] is not None:
+                lvl = f"""{html_lib.escape(r['vnum_str'])} <span style="color:#6b7280;font-size:12px;">m</span>"""
+            else:
+                lvl = f"""<span style="color:#6b7280;">{html_lib.escape(r['raw'])}</span>"""
+
+            pct_badge = pct_badge_html(r["pct_str"], r["cls"])
+
+            trs.append(
+                f"""
+                <tr bgcolor="{bg}" style="background:{bg};">
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;font-family:Arial,sans-serif;">
+                    {html_lib.escape(r['name'])}
+                  </td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:900;color:#111827;white-space:nowrap;font-family:Arial,sans-serif;">
+                    {lvl}
+                  </td>
+                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
+                    {pct_badge}
+                  </td>
+                </tr>
+                """
+            )
+
+        label = f"CENTRAL {central_name.upper()}"
+
+        title_block = f"""
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+               style="width:100%;border-collapse:collapse;margin:18px 0 10px 0;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+          <tr>
+            <td style="padding:0;">
+              {badge_html(label, header_color, "#ffffff")}
+            </td>
+          </tr>
+        </table>
+        """
+
+        return f"""
+        {title_block}
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"
+               style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+          <thead>
+            <tr bgcolor="{header_color}" style="background:{header_color};">
+              <th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">TANQUE</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">NIVEL</th>
+              <th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;letter-spacing:.4px;font-family:Arial,sans-serif;">% MAX</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(trs)}
+          </tbody>
+        </table>
+        """
+
+    panel_line = ""
+    if dashboard_url:
+        panel_line = f"""
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"
+               style="width:100%;border-collapse:collapse;margin-top:10px;mso-table-lspace:0pt;mso-table-rspace:0pt;">
+          <tr>
+            <td style="font-family:Arial,sans-serif;font-size:13px;color:#111827;">
+              <a href="{dashboard_url}" style="color:#2563eb;text-decoration:none;font-weight:900;">Abrir panel</a>
+              <span style="color:#94a3b8;font-size:12px;">(si tienes acceso desde fuera)</span>
+            </td>
+          </tr>
+        </table>
+        """
+
+    html_content = f"""
 <!--[if mso]>
 <style type="text/css">
-  table { border-collapse: collapse; }
-  td, th, div, p, a, span { font-family: Arial, sans-serif !important; }
+  table {{ border-collapse: collapse; }}
+  td, th, div, p, a, span {{ font-family: Arial, sans-serif !important; }}
 </style>
 <![endif]-->
 
@@ -634,78 +710,19 @@ def construir_email_resumen():
               🏭 Monitor de Niveles de Combustible
             </div>
             <div style="color:#cbd5e1;font-size:13px;margin-top:6px;font-family:Arial,sans-serif;">
-              Lectura: <span style="color:#ffffff;font-weight:900;">{{ captura_str }}</span>
+              Lectura: <span style="color:#ffffff;font-weight:900;">{captura_str}</span>
             </div>
             <div style="color:#94a3b8;font-size:12px;margin-top:4px;font-family:Arial,sans-serif;">
               Incluye % sobre máximo
             </div>
-            {% if is_stale %}
-            <div style="margin-top:10px; padding:10px; background:#7f1d1d; border:1px solid #f87171; border-radius:4px; color:#fecaca; font-weight:bold; font-size:13px; font-family:Arial,sans-serif;">
-              ⚠️ AVISO: Los datos mostrados son de hace {{ age_str }}. El sistema de captura está fallando.
-            </div>
-            {% endif %}
           </td>
         </tr>
 
         <tr>
           <td style="padding:18px;">
-            {{ panel_line | safe }}
-            
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;margin:18px 0 10px 0;">
-              <tr><td style="padding:0;">
-                <!--[if mso]>
-                <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="#" style="height:30px;width:180px;" arcsize="50%" stroke="f" fillcolor="#2563eb"><v:textbox inset="0,0,0,0"><table cellspacing="0" cellpadding="0" border="0" width="180" height="30"><tr><td align="center" valign="middle" style="padding-top:2px; color:#ffffff; font-family:Arial, sans-serif; font-size:13px; font-weight:bold;">CENTRAL BARRANCO</td></tr></table></v:textbox></v:roundrect>
-                <![endif]--><!--[if !mso]><!-->
-                <span style="display:inline-block;background:#2563eb;color:#ffffff;padding:7px 14px;border-radius:15px;font-weight:800;font-size:13px;font-family:Arial,sans-serif;">CENTRAL BARRANCO</span>
-                <!--<![endif]-->
-              </td></tr>
-            </table>
-            <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;">
-              <thead>
-                <tr bgcolor="#2563eb" style="background:#2563eb;"><th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;font-family:Arial,sans-serif;">TANQUE</th><th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;font-family:Arial,sans-serif;">NIVEL</th><th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;font-family:Arial,sans-serif;">% MAX</th></tr>
-              </thead>
-              <tbody>
-                {% for r in rows_b %}
-                <tr bgcolor="{{ '#ffffff' if loop.index0 % 2 == 0 else '#f8fafc' }}">
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;font-family:Arial,sans-serif;">{{ r.name }}</td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:900;color:#111827;white-space:nowrap;font-family:Arial,sans-serif;">
-                    {% if r.vnum_str %}{{ r.vnum_str }} <span style="color:#6b7280;font-size:12px;">m</span>{% else %}<span style="color:#6b7280;">{{ r.raw }}</span>{% endif %}
-                  </td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
-                    <span style="display:inline-block;background:{% if r.cls=='high' %}#16a34a{% elif r.cls=='medium' %}#d97706{% elif r.cls=='low' %}#dc2626{% else %}#6b7280{% endif %};color:#ffffff;padding:7px 14px;border-radius:15px;font-weight:800;font-size:13px;font-family:Arial,sans-serif;">{{ r.pct_str }}</span>
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;margin:18px 0 10px 0;">
-              <tr><td style="padding:0;">
-                <!--[if mso]>
-                <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="#" style="height:30px;width:180px;" arcsize="50%" stroke="f" fillcolor="#16a34a"><v:textbox inset="0,0,0,0"><table cellspacing="0" cellpadding="0" border="0" width="180" height="30"><tr><td align="center" valign="middle" style="padding-top:2px; color:#ffffff; font-family:Arial, sans-serif; font-size:13px; font-weight:bold;">CENTRAL JINAMAR</td></tr></table></v:textbox></v:roundrect>
-                <![endif]--><!--[if !mso]><!-->
-                <span style="display:inline-block;background:#16a34a;color:#ffffff;padding:7px 14px;border-radius:15px;font-weight:800;font-size:13px;font-family:Arial,sans-serif;">CENTRAL JINAMAR</span>
-                <!--<![endif]-->
-              </td></tr>
-            </table>
-            <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;">
-              <thead>
-                <tr bgcolor="#16a34a" style="background:#16a34a;"><th style="padding:10px 12px;text-align:left;color:#ffffff;font-size:12px;font-family:Arial,sans-serif;">TANQUE</th><th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;font-family:Arial,sans-serif;">NIVEL</th><th style="padding:10px 12px;text-align:right;color:#ffffff;font-size:12px;font-family:Arial,sans-serif;">% MAX</th></tr>
-              </thead>
-              <tbody>
-                {% for r in rows_j %}
-                <tr bgcolor="{{ '#ffffff' if loop.index0 % 2 == 0 else '#f8fafc' }}">
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;font-family:Arial,sans-serif;">{{ r.name }}</td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:900;color:#111827;white-space:nowrap;font-family:Arial,sans-serif;">
-                    {% if r.vnum_str %}{{ r.vnum_str }} <span style="color:#6b7280;font-size:12px;">m</span>{% else %}<span style="color:#6b7280;">{{ r.raw }}</span>{% endif %}
-                  </td>
-                  <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;text-align:right;white-space:nowrap;font-family:Arial,sans-serif;">
-                    <span style="display:inline-block;background:{% if r.cls=='high' %}#16a34a{% elif r.cls=='medium' %}#d97706{% elif r.cls=='low' %}#dc2626{% else %}#6b7280{% endif %};color:#ffffff;padding:7px 14px;border-radius:15px;font-weight:800;font-size:13px;font-family:Arial,sans-serif;">{{ r.pct_str }}</span>
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
+            {panel_line}
+            {render_table(rows_b, "#2563eb", "Barranco")}
+            {render_table(rows_j, "#16a34a", "Jinamar")}
 
             <div style="margin:14px 0 4px 0;color:#94a3b8;font-size:12px;line-height:1.35;font-family:Arial,sans-serif;">
               Nota: El porcentaje se calcula sobre el máximo configurado en la aplicación.
@@ -715,7 +732,7 @@ def construir_email_resumen():
 
         <tr>
           <td bgcolor="#f8fafc" style="background:#f8fafc;padding:12px 18px;color:#64748b;font-size:12px;border-top:1px solid #e5e7eb;font-family:Arial,sans-serif;">
-            Envío automático · {{ captura_str }}
+            Envío automático · {captura_str}
           </td>
         </tr>
 
@@ -726,30 +743,7 @@ def construir_email_resumen():
 </table>
 """
 
-    # Inyectar variables de estado al HTML
-    age_str = ""
-    if is_stale:
-        diff = datetime.now(TZ) - capture_dt
-        hours = diff.total_seconds() // 3600
-        mins = (diff.total_seconds() % 3600) // 60
-        if hours > 0:
-            age_str = f"{int(hours)}h {int(mins)}min"
-        else:
-            age_str = f"{int(mins)}min"
-
-    # Procesar el HTML con render_template_string
-    with app.app_context():
-        final_html = render_template_string(
-            html_content,
-            is_stale=is_stale,
-            age_str=age_str,
-            rows_b=rows_b,
-            rows_j=rows_j,
-            captura_str=captura_str,
-            panel_line=panel_line
-        )
-
-    return subject, text_content, final_html
+    return subject, text_content, html_content
 
 
 def enviar_resumen_programado(only_admin=False):
@@ -1289,22 +1283,11 @@ if __name__ == "__main__":
 
     scheduler.start()
 
-    # Ejecutar primera captura y email de deploy en segundo plano (vía scheduler)
-    # para no bloquear el arranque de la web.
-    scheduler.add_job(
-        func=ejecutar_scrapping,
-        trigger="date",
-        run_date=datetime.now(TZ) + timedelta(seconds=1),
-        id="startup_scrapping"
-    )
-    
-    scheduler.add_job(
-        func=enviar_resumen_programado,
-        trigger="date",
-        run_date=datetime.now(TZ) + timedelta(seconds=10),
-        args=[True], # only_admin=True
-        id="startup_email"
-    )
+    # Primera captura al arrancar
+    ejecutar_scrapping()
+
+    # Envío inmediato al arrancar (solo admin)
+    enviar_resumen_programado(only_admin=True)
 
     app.run(host="0.0.0.0", port=5000)
 
