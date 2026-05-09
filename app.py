@@ -724,6 +724,25 @@ def construir_email_resumen():
         </table>
         """
 
+    # Pre-calcular el bloque de aviso (evita f-string anidado con :.0f)
+    if datos_obsoletos:
+        horas_str = str(int(horas_retraso))
+        bloque_obsoleto = (
+            '<tr>'
+            '<td bgcolor="#b45309" style="background:#b45309;padding:12px 18px;">'
+            '<div style="color:#ffffff;font-size:14px;font-weight:900;font-family:Arial,sans-serif;">'
+            '&#9888;&#65039; AVISO: DATOS DESACTUALIZADOS'
+            '</div>'
+            '<div style="color:#fef3c7;font-size:13px;margin-top:4px;font-family:Arial,sans-serif;">'
+            f'La &uacute;ltima captura exitosa fue hace <strong>{horas_str} horas</strong> ({captura_str}). '
+            'El scraping fall&oacute; desde entonces &mdash; estos datos pueden no reflejar el estado actual.'
+            '</div>'
+            '</td>'
+            '</tr>'
+        )
+    else:
+        bloque_obsoleto = ""
+
     html_content = f"""
 <!--[if mso]>
 <style type="text/css">
@@ -754,19 +773,7 @@ def construir_email_resumen():
           </td>
         </tr>
 
-        {"" if not datos_obsoletos else f"""
-        <tr>
-          <td bgcolor="#b45309" style="background:#b45309;padding:12px 18px;">
-            <div style="color:#ffffff;font-size:14px;font-weight:900;font-family:Arial,sans-serif;">
-              &#9888;&#65039; AVISO: DATOS DESACTUALIZADOS
-            </div>
-            <div style="color:#fef3c7;font-size:13px;margin-top:4px;font-family:Arial,sans-serif;">
-              La &uacute;ltima captura exitosa fue hace <strong>{horas_retraso:.0f} horas</strong> ({captura_str}).
-              El scraping fall&oacute; desde entonces &mdash; estos datos pueden no reflejar el estado actual.
-            </div>
-          </td>
-        </tr>
-        """}
+        {bloque_obsoleto}
 
         <tr>
           <td style="padding:18px;">
