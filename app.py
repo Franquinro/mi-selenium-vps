@@ -259,19 +259,19 @@ def ejecutar_scrapping(incluir_agua=False):
 
     except Exception as e:
         print(f"Error detectado: {e}")
-        # Enviar alerta de fallo (solo al admin)
+        # Enviar alerta de fallo a todos los de MAIL_ALERT
         try:
-            admin_mails = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
-            if admin_mails:
+            alert_mails = [x.strip() for x in os.getenv("MAIL_ALERT", "").split(",") if x.strip()]
+            if alert_mails:
                 error_html = f"<h3>Error en el Scrapping</h3><p>Se ha detectado un error al intentar capturar los datos:</p><pre>{e}</pre>"
                 enviar_email_brevo_api(
-                    subject="⚠️ ALERTA: Fallo Scrapping Niveles",
+                    subject="\u26a0\ufe0f ALERTA: Fallo Scrapping Niveles",
                     text_content=f"Error Scrapping: {e}",
                     html_content=error_html,
-                    recipients=[admin_mails[0]]
+                    recipients=alert_mails
                 )
             else:
-                print("ALERTA FALLIDA: No hay destinatarios en MAIL_TO para enviar el aviso de error.")
+                print("ALERTA FALLIDA: No hay MAIL_ALERT configurado para enviar el aviso de error.")
         except Exception as ex_mail:
             print(f"No se pudo enviar email de alerta: {ex_mail}")
 
@@ -809,10 +809,12 @@ def enviar_resumen_programado(only_admin=False):
         
         recipients = None
         if only_admin:
-            all_mails = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
-            if all_mails:
-                recipients = [all_mails[0]]
+            alert_mails = [x.strip() for x in os.getenv("MAIL_ALERT", "").split(",") if x.strip()]
+            if alert_mails:
+                recipients = alert_mails
                 subject = f"[DEPLOY] {subject}"
+            else:
+                print("DEPLOY EMAIL: No hay MAIL_ALERT configurado, enviando a todos los destinatarios.")
         
         enviar_email_brevo_api(subject, text_content, html_content, recipients=recipients)
     except Exception as e:
